@@ -80,17 +80,32 @@ npm run dev                   # http://localhost:3000
 - **Admin panel → Vercel.** Set root directory to `web/` and the
   `NEXT_PUBLIC_ENGINE_URL` / `NEXT_PUBLIC_ENGINE_WS` env vars to the Railway URL.
 
-## What you need to plug in (when ready)
+## Configuration: two ways
+
+You can configure the bot either from the **web Setup page** (friendliest) or
+via **environment variables** (good for automated deploys). Env values are
+defaults; anything saved in the Setup page overrides them and is stored
+**encrypted at rest** (Fernet, keyed by `APP_SECRET`).
+
+### Setup page (recommended)
+
+Sign in → **Setup** tab → enter your Kalshi environment, API Key ID, and RSA
+private key, optional Claude/Gemini keys, and trading parameters → **Test Kalshi
+connection** → **Save & apply** (hot-reloads the engine). Secrets are never sent
+back to the browser — only masked "•••• set" indicators.
+
+### Bootstrap env vars (set once on the host)
 
 | Secret | Where | Notes |
 | --- | --- | --- |
-| `KALSHI_API_KEY_ID` + RSA key | Railway env | From Kalshi → Account → API. Confirm your account is approved for API trading. |
-| `ADMIN_PASSWORD`, `JWT_SECRET` | Railway env | Protects the admin panel. |
+| `ADMIN_PASSWORD`, `JWT_SECRET` | Railway env | Protect the admin panel / sign tokens. |
+| `APP_SECRET` | Railway env | Long random string; encrypts Setup-page secrets. Keep stable. |
 | `DATABASE_URL` | Railway env | Postgres plugin URL. |
-| `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | Railway env | Optional; enables the LLM meta-layer. |
+| `KALSHI_API_KEY_ID` + RSA key | Railway env *or* Setup page | From Kalshi → Account → API. Confirm API-trading approval. |
+| `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | Railway env *or* Setup page | Optional; enables the LLM meta-layer. |
 
-Start on `KALSHI_ENV=demo` + paper mode. Once the model shows positive
-paper P&L across many windows, switch to `prod` and flip live with tight caps.
+Start on `demo` + paper mode. Once the model shows positive paper P&L across many
+windows, switch to `prod` and flip live with tight caps.
 
 ## Roadmap
 

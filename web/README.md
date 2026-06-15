@@ -11,6 +11,8 @@ Next.js 14 (App Router) + Tailwind admin panel for the KalshiBot engine.
   confirmation modal), kill switch, and the risk-parameter form.
 - **AI Log** — quant + LLM decision feed.
 - **History** — trade/settlement log.
+- **Setup** — configure Kalshi/AI credentials and trading params in-app
+  (secrets stored encrypted by the engine); test the Kalshi connection.
 
 ## Develop
 

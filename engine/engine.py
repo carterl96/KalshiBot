@@ -55,22 +55,19 @@ class TradingEngine:
     def __init__(self, settings: Settings, store: Store):
         self.settings = settings
         self.store = store
-        self.mode = settings.start_mode
         self.running = False
         self.started_at = time.time()
         self.last_latency_ms = 0.0
 
-        # Auth / REST / feeds
-        self.signer: Optional[KalshiSigner] = self._build_signer()
-        self.rest = KalshiRestClient(settings.rest_base, self.signer)
-        self.kalshi_ws = KalshiWS(settings.ws_base, self.signer)
-        self.spot = SpotFeed(self._spot_products())
-        self.markets = MarketManager(self.rest, settings.series_list)
+        # Live UI broadcast
+        self._subscribers: set[asyncio.Queue] = set()
+        self._tasks: list[asyncio.Task] = []
 
-        # Strategy / risk / execution
-        self.vol: dict[str, VolEstimator] = {
-            p: VolEstimator(settings.vol_lookback_s) for p in self._spot_products()
-        }
+        # Latest evaluated signals for the markets view.
+        self.signals: dict[str, Signal] = {}
+        self.guidance = MetaGuidance()
+
+        # Risk params persist across settings reloads (managed from Controls).
         self.risk = RiskEngine(
             RiskParams(
                 max_per_trade=settings.max_per_trade,
@@ -81,25 +78,59 @@ class TradingEngine:
                 kelly_fraction=settings.kelly_fraction,
             )
         )
+
+        self._build_from_settings(settings)
+
+    def _build_from_settings(self, settings: Settings) -> None:
+        """(Re)construct credential-dependent clients and feeds from settings."""
+        self.settings = settings
+        self.mode = settings.start_mode
+
+        self.signer = self._build_signer()
+        self.rest = KalshiRestClient(settings.rest_base, self.signer)
+        self.kalshi_ws = KalshiWS(settings.ws_base, self.signer)
+        self.spot = SpotFeed(self._spot_products())
+        self.spot.on_tick(self._on_spot)
+        self.markets = MarketManager(self.rest, settings.series_list)
+        self.vol = {
+            p: VolEstimator(settings.vol_lookback_s) for p in self._spot_products()
+        }
         self.orders = OrderManager(
             rest=self.rest, mode=self.mode, balance=settings.starting_balance
         )
-
-        # LLM meta-layer (advisory)
         self.llm = LLMMetaLayer(
             anthropic_key=settings.anthropic_api_key,
             gemini_key=settings.gemini_api_key,
         )
-        self.guidance = MetaGuidance()
 
-        # Live UI broadcast
-        self._subscribers: set[asyncio.Queue] = set()
-        self._tasks: list[asyncio.Task] = []
+    async def apply_settings(self, settings: Settings) -> None:
+        """Swap in new effective settings, rebuilding clients. Restarts the
+        engine if it was running so new credentials/feeds take effect."""
+        was_running = self.running
+        if was_running:
+            await self.stop()
+        await self.rest.close()
+        await self.llm.close()
+        self._build_from_settings(settings)
+        log.info("Settings applied (env=%s, has_creds=%s)",
+                 settings.kalshi_env, self.signer is not None)
+        if was_running:
+            await self.start()
+        await self.broadcast_state()
 
-        # Latest evaluated signals for the markets view.
-        self.signals: dict[str, Signal] = {}
-
-        self.spot.on_tick(self._on_spot)
+    async def test_connection(self) -> dict:
+        """Verify Kalshi credentials by signing a balance request."""
+        if self.signer is None:
+            return {"ok": False, "detail": "no Kalshi credentials configured"}
+        try:
+            bal = await self.rest.get_balance()
+            return {
+                "ok": True,
+                "env": self.settings.kalshi_env,
+                "balance_usd": round(float(bal.get("balance", 0)) / 100.0, 2),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "detail": str(exc)}
 
     # ---- setup helpers ----
     def _build_signer(self) -> Optional[KalshiSigner]:
@@ -430,6 +461,7 @@ class TradingEngine:
             "latency_ms": round(self.last_latency_ms, 2),
             "llm_enabled": self.llm.enabled,
             "has_credentials": self.signer is not None,
+            "kalshi_env": self.settings.kalshi_env,
         }
 
     def markets_snapshot(self) -> list[dict]:

@@ -73,6 +73,15 @@ class EquityPoint(Base):
         return {"ts": self.ts, "equity": self.equity}
 
 
+class AppSetting(Base):
+    """Key/value app configuration written from the Setup page. Secret values
+    are stored already-encrypted by the caller."""
+
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
 class Store:
     def __init__(self, database_url: str):
         self.engine = create_async_engine(database_url, future=True)
@@ -127,3 +136,18 @@ class Store:
             )
             rows = [r.to_dict() for r in res.scalars().all()]
             return list(reversed(rows))
+
+    async def get_app_settings(self) -> dict[str, str]:
+        async with self.session() as s:
+            res = await s.execute(select(AppSetting))
+            return {r.key: r.value for r in res.scalars().all()}
+
+    async def set_app_settings(self, values: dict[str, str]) -> None:
+        async with self.session() as s:
+            for key, value in values.items():
+                row = await s.get(AppSetting, key)
+                if row is None:
+                    s.add(AppSetting(key=key, value=value))
+                else:
+                    row.value = value
+            await s.commit()

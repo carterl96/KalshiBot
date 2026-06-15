@@ -19,12 +19,14 @@ from pydantic import BaseModel
 
 from engine.config import get_settings
 from engine.engine import TradingEngine
+from engine.settings_store import SettingsManager
 from engine.telemetry.store import Store
 
 log = logging.getLogger("api")
 
 settings = get_settings()
 store = Store(settings.database_url)
+settings_mgr = SettingsManager(store, settings.app_secret)
 engine: TradingEngine | None = None
 
 
@@ -32,8 +34,10 @@ engine: TradingEngine | None = None
 async def lifespan(app: FastAPI):
     global engine
     await store.init()
-    engine = TradingEngine(settings, store)
-    if settings.autostart:
+    # Build the engine from env settings overlaid with saved operator settings.
+    effective = await settings_mgr.effective(settings)
+    engine = TradingEngine(effective, store)
+    if effective.autostart:
         await engine.start()
     yield
     if engine:
@@ -168,6 +172,28 @@ async def control_reset(_: None = Depends(require_auth)):
 async def control_mode(body: ModeBody, _: None = Depends(require_auth)):
     await get_engine().set_mode(body.mode)
     return {"ok": True, "mode": body.mode}
+
+
+# ---- setup / settings (auth) ----
+@app.get("/api/settings")
+async def get_settings_view(_: None = Depends(require_auth)):
+    """Operator-configurable settings; secrets returned masked."""
+    return await settings_mgr.public_view()
+
+
+@app.post("/api/settings")
+async def save_settings(payload: dict, _: None = Depends(require_auth)):
+    """Persist settings and hot-apply them to the running engine."""
+    await settings_mgr.save(payload)
+    effective = await settings_mgr.effective(settings)
+    await get_engine().apply_settings(effective)
+    return await settings_mgr.public_view()
+
+
+@app.post("/api/settings/test")
+async def test_connection(_: None = Depends(require_auth)):
+    """Verify Kalshi credentials currently loaded in the engine."""
+    return await get_engine().test_connection()
 
 
 # ---- websocket stream ----

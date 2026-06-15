@@ -107,6 +107,34 @@ export interface EquityPoint {
   equity: number;
 }
 
+export interface SecretField {
+  set: boolean;
+  hint: string;
+}
+
+export interface SettingsView {
+  kalshi_env: string | null;
+  series: string | null;
+  start_mode: string | null;
+  autostart: boolean | null;
+  starting_balance: number | null;
+  llm_enabled: boolean | null;
+  min_edge: number | null;
+  fee_buffer: number | null;
+  vol_lookback_s: number | null;
+  kalshi_api_key_id: SecretField;
+  kalshi_private_key: SecretField;
+  anthropic_api_key: SecretField;
+  gemini_api_key: SecretField;
+}
+
+export interface ConnTest {
+  ok: boolean;
+  detail?: string;
+  env?: string;
+  balance_usd?: number;
+}
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -170,6 +198,15 @@ export const api = {
       { method: "POST", body: JSON.stringify({ mode }) },
       true
     ),
+  getSettings: () => req<SettingsView>("/api/settings", {}, true),
+  saveSettings: (payload: Record<string, any>) =>
+    req<SettingsView>(
+      "/api/settings",
+      { method: "POST", body: JSON.stringify(payload) },
+      true
+    ),
+  testConnection: () =>
+    req<ConnTest>("/api/settings/test", { method: "POST" }, true),
 };
 
 export { ApiError };

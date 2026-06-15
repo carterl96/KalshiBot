@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     # --- API / auth ---
     admin_password: str = Field(default="changeme")
     jwt_secret: str = Field(default="dev-insecure-secret-change-me")
+    # Used to derive the Fernet key that encrypts secrets at rest in the DB.
+    app_secret: str = Field(default="dev-insecure-app-secret-change-me")
     cors_origins: str = Field(default="*")
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
