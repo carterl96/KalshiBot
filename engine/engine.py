@@ -1,0 +1,454 @@
+"""TradingEngine: the orchestrator that runs the whole pipeline.
+
+Responsibilities:
+  * own the market-data feeds (Kalshi WS + Coinbase spot) and vol estimation
+  * periodically refresh the tradeable market set and resubscribe
+  * on a fast tick, evaluate each active market for edge, size via the risk
+    engine, and route orders through the OrderManager (paper or live)
+  * detect window close and settle positions
+  * snapshot equity and broadcast live state to connected UI clients
+  * run the optional LLM meta-layer on a slow timer to adjust the risk dial
+
+The hot path (evaluate -> risk -> order) is fully deterministic and never waits
+on the LLM. The LLM loop only mutates an advisory ``risk_dial`` and active
+strategy that bias sizing/selection.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+from engine.auth.rest_client import KalshiRestClient
+from engine.auth.signer import KalshiSigner
+from engine.config import Settings
+from engine.data.kalshi_ws import KalshiWS, OrderBook
+from engine.data.spot import SpotFeed
+from engine.execution.orders import OrderManager
+from engine.llm.meta import LLMMetaLayer, MetaGuidance
+from engine.markets import MarketInfo, MarketManager
+from engine.pricing.model import VolEstimator
+from engine.risk.limits import RiskEngine, RiskParams
+from engine.strategy.edge import Signal, evaluate
+from engine.telemetry.store import Store
+
+log = logging.getLogger("engine")
+
+# Map a Kalshi series prefix to the spot product used to price it.
+SERIES_TO_PRODUCT = {
+    "KXBTC": "BTC-USD",
+    "KXETH": "ETH-USD",
+}
+
+
+def product_for_series(series: str) -> str:
+    for prefix, product in SERIES_TO_PRODUCT.items():
+        if series.startswith(prefix):
+            return product
+    return "BTC-USD"
+
+
+class TradingEngine:
+    def __init__(self, settings: Settings, store: Store):
+        self.settings = settings
+        self.store = store
+        self.mode = settings.start_mode
+        self.running = False
+        self.started_at = time.time()
+        self.last_latency_ms = 0.0
+
+        # Auth / REST / feeds
+        self.signer: Optional[KalshiSigner] = self._build_signer()
+        self.rest = KalshiRestClient(settings.rest_base, self.signer)
+        self.kalshi_ws = KalshiWS(settings.ws_base, self.signer)
+        self.spot = SpotFeed(self._spot_products())
+        self.markets = MarketManager(self.rest, settings.series_list)
+
+        # Strategy / risk / execution
+        self.vol: dict[str, VolEstimator] = {
+            p: VolEstimator(settings.vol_lookback_s) for p in self._spot_products()
+        }
+        self.risk = RiskEngine(
+            RiskParams(
+                max_per_trade=settings.max_per_trade,
+                max_per_window=settings.max_per_window,
+                daily_loss_limit=settings.daily_loss_limit,
+                max_exposure=settings.max_exposure,
+                max_drawdown_pct=settings.max_drawdown_pct,
+                kelly_fraction=settings.kelly_fraction,
+            )
+        )
+        self.orders = OrderManager(
+            rest=self.rest, mode=self.mode, balance=settings.starting_balance
+        )
+
+        # LLM meta-layer (advisory)
+        self.llm = LLMMetaLayer(
+            anthropic_key=settings.anthropic_api_key,
+            gemini_key=settings.gemini_api_key,
+        )
+        self.guidance = MetaGuidance()
+
+        # Live UI broadcast
+        self._subscribers: set[asyncio.Queue] = set()
+        self._tasks: list[asyncio.Task] = []
+
+        # Latest evaluated signals for the markets view.
+        self.signals: dict[str, Signal] = {}
+
+        self.spot.on_tick(self._on_spot)
+
+    # ---- setup helpers ----
+    def _build_signer(self) -> Optional[KalshiSigner]:
+        pem = self.settings.load_private_key_pem()
+        if self.settings.kalshi_api_key_id and pem:
+            try:
+                return KalshiSigner(self.settings.kalshi_api_key_id, pem)
+            except Exception as exc:  # noqa: BLE001
+                log.error("failed to load Kalshi signer: %s", exc)
+        log.warning("No Kalshi credentials; running with public data only")
+        return None
+
+    def _spot_products(self) -> list[str]:
+        products = {product_for_series(s) for s in self.settings.series_list}
+        return sorted(products) or ["BTC-USD"]
+
+    # ---- lifecycle ----
+    async def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        if self.mode == "live":
+            await self.orders.sync_live_balance()
+        self.spot.start()
+        self.kalshi_ws.start()
+        await self._refresh_markets()
+        self._tasks = [
+            asyncio.create_task(self._eval_loop(), name="eval"),
+            asyncio.create_task(self._market_refresh_loop(), name="refresh"),
+            asyncio.create_task(self._equity_loop(), name="equity"),
+            asyncio.create_task(self._settlement_loop(), name="settle"),
+            asyncio.create_task(self._llm_loop(), name="llm"),
+        ]
+        log.info("Engine started in %s mode", self.mode)
+        await self.broadcast_state()
+
+    async def stop(self) -> None:
+        self.running = False
+        for t in self._tasks:
+            t.cancel()
+        for t in self._tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        self._tasks = []
+        await self.spot.stop()
+        await self.kalshi_ws.stop()
+        log.info("Engine stopped")
+        await self.broadcast_state()
+
+    async def shutdown(self) -> None:
+        await self.stop()
+        await self.rest.close()
+        await self.llm.close()
+
+    async def set_mode(self, mode: str) -> None:
+        if mode not in ("paper", "live"):
+            raise ValueError("mode must be paper or live")
+        self.mode = mode
+        self.orders.mode = mode
+        if mode == "live":
+            await self.orders.sync_live_balance()
+        log.warning("Trading mode set to %s", mode)
+        await self.broadcast_state()
+
+    def kill_switch(self) -> None:
+        """Engage the kill switch: block entries and flatten on next settle."""
+        self.risk.trip_kill_switch()
+        asyncio.create_task(self._flatten_all())
+
+    def reset_risk(self) -> None:
+        self.risk.reset()
+
+    async def _flatten_all(self) -> None:
+        for key, pos in list(self.orders.positions.items()):
+            if pos.quantity <= 0:
+                continue
+            book = self.kalshi_ws.book(pos.ticker)
+            bid = book.yes_bid_ask()[0] if pos.side == "up" else book.no_bid_ask()[0]
+            price = (bid / 100.0) if bid else pos.avg_price
+            res = await self.orders.sell(pos.ticker, pos.side, pos.quantity, price,
+                                         reason="kill switch flatten")
+            if res.ok:
+                await self._log_trade(res)
+
+    # ---- feed callbacks ----
+    def _on_spot(self, product: str, price: float, ts: float) -> None:
+        est = self.vol.get(product)
+        if est:
+            est.add(ts, price)
+
+    # ---- main loops ----
+    async def _eval_loop(self) -> None:
+        """Fast evaluation loop: price every active market and act on edge."""
+        while self.running:
+            t0 = time.perf_counter()
+            try:
+                await self._evaluate_all()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("eval loop error: %s", exc)
+            self.last_latency_ms = (time.perf_counter() - t0) * 1000.0
+            await asyncio.sleep(0.5)
+
+    async def _evaluate_all(self) -> None:
+        now = datetime.now(timezone.utc)
+        for m in self.markets.active(now):
+            product = product_for_series(m.series)
+            spot = self.spot.get(product)
+            sigma = self.vol[product].sigma_annual() if product in self.vol else 0.0
+            if not spot or sigma <= 0:
+                continue
+            book = self.kalshi_ws.book(m.ticker)
+            tau = m.tau_seconds(now)
+            for side in ("up", "down"):
+                sig = evaluate(
+                    ticker=m.ticker,
+                    side=side,
+                    spot=spot,
+                    strike=m.strike,
+                    sigma_annual=sigma,
+                    tau_seconds=tau,
+                    book=book,
+                    min_edge=self.settings.min_edge,
+                    fee_buffer=self.settings.fee_buffer,
+                )
+                if sig is None:
+                    continue
+                self.signals[f"{m.ticker}:{side}"] = sig
+                if sig.tradeable:
+                    await self._act_on_signal(m, sig)
+
+    async def _act_on_signal(self, market: MarketInfo, sig: Signal) -> None:
+        equity = self.orders.equity(self._mark_prices())
+        self.risk.record_equity(equity)
+        check = self.risk.check(
+            edge=sig.edge,
+            price_prob=sig.ask_prob,
+            bankroll=self.orders.balance,
+            window_exposure=self.orders.window_exposure(market.ticker),
+            total_exposure=self.orders.total_exposure(),
+        )
+        # Apply the advisory LLM risk dial to the quantity.
+        qty = int(check.quantity * self.guidance.risk_dial) if check.ok else 0
+        action_taken = ""
+        if check.ok and qty >= 1:
+            res = await self.orders.buy(
+                market.ticker, sig.side, qty, sig.ask_prob, reason=sig.reason
+            )
+            if res.ok:
+                action_taken = f"buy {qty} {sig.side}"
+                await self._log_trade(res)
+        await self.store.add_decision(
+            ticker=market.ticker,
+            decision="tradeable" if sig.tradeable else "skip",
+            model_prob=sig.model_prob,
+            market_price=sig.ask_prob,
+            edge=sig.edge,
+            action_taken=action_taken or (check.reason if not check.ok else "no size"),
+            source="quant",
+            detail=f"imbalance={sig.imbalance:.2f} near_close={sig.near_close}",
+        )
+        await self._broadcast({"type": "decision", "data": {
+            "ticker": market.ticker, "edge": sig.edge, "model_prob": sig.model_prob,
+            "action": action_taken,
+        }})
+
+    def _mark_prices(self) -> dict[str, float]:
+        marks: dict[str, float] = {}
+        for key in self.orders.positions:
+            ticker, side = key.split(":")
+            book = self.kalshi_ws.book(ticker)
+            bid = book.yes_bid_ask()[0] if side == "up" else book.no_bid_ask()[0]
+            if bid is not None:
+                marks[key] = bid / 100.0
+        return marks
+
+    async def _market_refresh_loop(self) -> None:
+        while self.running:
+            await asyncio.sleep(30)
+            try:
+                await self._refresh_markets()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("market refresh loop error: %s", exc)
+
+    async def _refresh_markets(self) -> None:
+        tickers = await self.markets.refresh()
+        if tickers:
+            await self.kalshi_ws.resubscribe(tickers)
+
+    async def _equity_loop(self) -> None:
+        while self.running:
+            equity = self.orders.equity(self._mark_prices())
+            self.risk.record_equity(equity)
+            await self.store.add_equity(equity)
+            await self.broadcast_state()
+            await asyncio.sleep(5)
+
+    async def _settlement_loop(self) -> None:
+        """Settle positions for markets that have closed."""
+        while self.running:
+            await asyncio.sleep(5)
+            now = datetime.now(timezone.utc)
+            for ticker in list({k.split(":")[0] for k in self.orders.positions}):
+                info = self.markets.get(ticker)
+                if info and info.tau_seconds(now) > 0:
+                    continue
+                await self._settle_market(ticker, info)
+
+    async def _settle_market(self, ticker: str, info: Optional[MarketInfo]) -> None:
+        up_wins: Optional[bool] = None
+        try:
+            m = (await self.rest.get_market(ticker)).get("market", {})
+            result = m.get("result")
+            if result in ("yes", "no"):
+                up_wins = result == "yes"
+        except Exception:  # noqa: BLE001
+            pass
+        if up_wins is None and info is not None:
+            product = product_for_series(info.series)
+            spot = self.spot.get(product)
+            if spot is not None:
+                up_wins = spot > info.strike
+        if up_wins is None:
+            return
+        pnl = self.orders.settle(ticker, up_wins)
+        self.risk.record_realized(pnl)
+        await self.store.add_trade(
+            ticker=ticker, side="settle", action="settle", quantity=0,
+            price=0.0, mode=self.mode, pnl=pnl, reason=f"up_wins={up_wins}",
+        )
+        await self.broadcast_state()
+
+    async def _llm_loop(self) -> None:
+        while self.running:
+            await asyncio.sleep(30)
+            if not self.llm.enabled:
+                continue
+            try:
+                ctx = self._llm_context()
+                self.guidance = await self.llm.advise(ctx)
+                await self.store.add_decision(
+                    ticker="*", decision="meta",
+                    model_prob=0.0, market_price=0.0, edge=0.0,
+                    action_taken=f"risk_dial={self.guidance.risk_dial:.2f}",
+                    source="llm", detail=self.guidance.note,
+                )
+                await self.broadcast_state()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("llm loop error: %s", exc)
+
+    def _llm_context(self) -> dict:
+        return {
+            "mode": self.mode,
+            "balance": round(self.orders.balance, 2),
+            "realized_pnl": round(self.orders.realized_pnl, 2),
+            "realized_today": round(self.risk.realized_today, 2),
+            "open_positions": len(self.orders.positions),
+            "recent_edges": [
+                round(s.edge, 3) for s in list(self.signals.values())[-10:]
+            ],
+        }
+
+    # ---- telemetry / broadcast ----
+    async def _log_trade(self, res) -> None:
+        row = await self.store.add_trade(
+            ticker=res.ticker, side=res.side, action=res.action,
+            quantity=res.quantity, price=res.price, mode=res.mode, reason=res.reason,
+        )
+        await self._broadcast({"type": "trade", "data": row})
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    async def _broadcast(self, message: dict) -> None:
+        dead = []
+        for q in self._subscribers:
+            try:
+                q.put_nowait(message)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            self._subscribers.discard(q)
+
+    async def broadcast_state(self) -> None:
+        await self._broadcast({"type": "state", "data": self.state_snapshot()})
+
+    # ---- snapshots for the API ----
+    def state_snapshot(self) -> dict:
+        marks = self._mark_prices()
+        equity = self.orders.equity(marks)
+        positions = []
+        for key, p in self.orders.positions.items():
+            if p.quantity <= 0:
+                continue
+            cur = marks.get(key, p.avg_price)
+            positions.append({
+                "ticker": p.ticker, "side": p.side, "quantity": p.quantity,
+                "avg_price": round(p.avg_price, 4), "current_price": round(cur, 4),
+                "unrealized_pnl": round(p.quantity * (cur - p.avg_price), 2),
+            })
+        return {
+            "mode": self.mode,
+            "running": self.running,
+            "balance": round(self.orders.balance, 2),
+            "equity": round(equity, 2),
+            "pnl_today": round(self.risk.realized_today, 2),
+            "pnl_total": round(self.orders.realized_pnl, 2),
+            "positions": positions,
+            "active_strategy": self.guidance.active_strategy,
+            "risk_dial": self.guidance.risk_dial,
+            "circuit_broken": self.risk.circuit_broken,
+            "kill_switched": self.risk.kill_switched,
+            "risk_params": self.risk.params.to_dict(),
+        }
+
+    def health_snapshot(self) -> dict:
+        return {
+            "status": "ok",
+            "mode": self.mode,
+            "engine_running": self.running,
+            "uptime_s": round(time.time() - self.started_at, 1),
+            "latency_ms": round(self.last_latency_ms, 2),
+            "llm_enabled": self.llm.enabled,
+            "has_credentials": self.signer is not None,
+        }
+
+    def markets_snapshot(self) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        out = []
+        for m in self.markets.active(now):
+            product = product_for_series(m.series)
+            spot = self.spot.get(product)
+            book = self.kalshi_ws.book(m.ticker)
+            yes_bid, yes_ask = book.yes_bid_ask()
+            for side in ("up", "down"):
+                sig = self.signals.get(f"{m.ticker}:{side}")
+                out.append({
+                    "ticker": m.ticker, "series": m.series, "side": side,
+                    "strike": m.strike, "spot": spot,
+                    "kalshi_bid": yes_bid, "kalshi_ask": yes_ask,
+                    "mid": book.mid(),
+                    "model_prob": round(sig.model_prob, 4) if sig else None,
+                    "edge": round(sig.edge, 4) if sig else None,
+                    "time_to_close_s": round(m.tau_seconds(now)),
+                })
+        return out
