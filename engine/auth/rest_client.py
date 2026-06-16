@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from typing import Any, Optional
 
@@ -39,17 +40,23 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
+
+
 class KalshiRestClient:
     def __init__(
         self,
         rest_base: str,
         signer: Optional[KalshiSigner] = None,
         rate: float = 8.0,
+        max_retries: int = 4,
     ):
         self.rest_base = rest_base.rstrip("/")
         self.signer = signer
         self._limiter = RateLimiter(rate)
-        self._client = httpx.AsyncClient(timeout=10.0)
+        self._client = httpx.AsyncClient(timeout=15.0)
+        self._max_retries = max_retries
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -67,7 +74,7 @@ class KalshiRestClient:
         params: Optional[dict] = None,
         json: Optional[dict] = None,
     ) -> dict[str, Any]:
-        await self._limiter.wait()
+        """Execute a request with exponential-backoff retry for transient errors."""
         url = f"{self.rest_base}{path}"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if auth:
@@ -76,17 +83,38 @@ class KalshiRestClient:
             sign_path = KalshiSigner.path_without_query(self._signed_path(path))
             headers.update(self.signer.headers(method, sign_path))
 
-        resp = await self._client.request(
-            method, url, headers=headers, params=params, json=json
-        )
-        if resp.status_code == 429:
-            log.warning("Rate limited by Kalshi (429); backing off 1s")
-            await asyncio.sleep(1.0)
-            return await self._request(
-                method, path, auth=auth, params=params, json=json
-            )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            if attempt > 0:
+                # Exponential backoff with jitter: 1s, 2s, 4s, 8s + up to 0.5s jitter
+                delay = min(2 ** attempt, 16) + random.uniform(0, 0.5)
+                log.info("REST retry %d/%d for %s %s (%.1fs)", attempt, self._max_retries, method, path, delay)
+                await asyncio.sleep(delay)
+
+            await self._limiter.wait()
+            try:
+                resp = await self._client.request(
+                    method, url, headers=headers, params=params, json=json
+                )
+            except _RETRYABLE_ERRORS as exc:
+                last_exc = exc
+                log.warning("REST transport error (attempt %d): %s", attempt + 1, exc)
+                continue
+
+            if resp.status_code in _RETRYABLE_STATUS:
+                retry_after = float(resp.headers.get("Retry-After", 0))
+                sleep = max(retry_after, 2 ** attempt) + random.uniform(0, 0.5)
+                log.warning("REST %d (attempt %d); sleeping %.1fs", resp.status_code, attempt + 1, sleep)
+                await asyncio.sleep(sleep)
+                last_exc = httpx.HTTPStatusError(
+                    f"HTTP {resp.status_code}", request=resp.request, response=resp
+                )
+                continue
+
+            resp.raise_for_status()
+            return resp.json() if resp.content else {}
+
+        raise last_exc or RuntimeError("max retries exceeded")
 
     # --- Public market data ---
     async def get_markets(self, **params) -> dict:

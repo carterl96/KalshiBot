@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from typing import Callable, Optional
 
@@ -160,9 +161,11 @@ class KalshiWS:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                log.warning("Kalshi WS error: %s; reconnecting in %.0fs", exc, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                jitter = random.uniform(0, backoff * 0.2)
+                wait = backoff + jitter
+                log.warning("Kalshi WS error: %s; reconnecting in %.1fs", exc, wait)
+                await asyncio.sleep(wait)
+                backoff = min(backoff * 2, 60.0)
             finally:
                 self._ws = None
 

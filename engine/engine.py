@@ -35,6 +35,7 @@ from engine.markets import MarketInfo, MarketManager
 from engine.pricing.model import VolEstimator
 from engine.risk.limits import RiskEngine, RiskParams
 from engine.strategy.edge import Signal, evaluate
+from engine.data.brrny import BRRNYFeed
 from engine.data.tick_collector import TickCollector
 from engine.telemetry.calibration import CalibrationTracker
 from engine.telemetry.store import Store
@@ -83,6 +84,9 @@ class TradingEngine:
 
         # Tick collector: persists market snapshots to DB for backtesting.
         self.tick_collector = TickCollector(store, interval_s=60.0)
+
+        # BRRNY feed for hourly market settlement.
+        self.brrny = BRRNYFeed()
 
         # Risk params persist across settings reloads (managed from Controls).
         self.risk = RiskEngine(
@@ -208,6 +212,7 @@ class TradingEngine:
         await self.rest.close()
         await self.llm.close()
         await self.alerts.close()
+        await self.brrny.close()
 
     async def set_mode(self, mode: str) -> None:
         if mode not in ("paper", "live"):
@@ -246,6 +251,9 @@ class TradingEngine:
         est = self.vol.get(product)
         if est:
             est.add(ts, price)
+        # Keep BRRNY spot fallback updated with latest BTC price.
+        if product == "BTC-USD":
+            self.brrny.set_spot_fallback(price)
 
     # ---- main loops ----
     async def _eval_loop(self) -> None:
@@ -481,9 +489,16 @@ class TradingEngine:
             pass
         if up_wins is None and info is not None:
             product = product_for_series(info.series)
-            spot = self.spot.get(product)
-            if spot is not None:
-                up_wins = spot > info.strike
+            # Hourly KXBTCD markets settle on BRRNY; 15-min KXBTC15M on spot.
+            is_hourly = "KXBTCD" in info.series.upper()
+            if is_hourly:
+                ref_price = await self.brrny.settlement_price()
+                log.info("Hourly settlement %s using BRRNY/fallback: %.2f (strike=%.2f)",
+                         ticker, ref_price or 0.0, info.strike)
+            else:
+                ref_price = self.spot.get(product)
+            if ref_price is not None:
+                up_wins = ref_price > info.strike
         if up_wins is None:
             return
         pnl = self.orders.settle(ticker, up_wins)
