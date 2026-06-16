@@ -33,6 +33,7 @@ SECRET_FIELDS = {
     "kalshi_private_key",
     "anthropic_api_key",
     "gemini_api_key",
+    "alert_webhook_url",
 }
 # Non-secret fields with their type coercion.
 PLAIN_FIELDS: dict[str, type] = {
@@ -45,6 +46,7 @@ PLAIN_FIELDS: dict[str, type] = {
     "min_edge": float,
     "fee_buffer": float,
     "vol_lookback_s": int,
+    "alert_equity_drop_pct": float,
 }
 ALL_FIELDS = SECRET_FIELDS | set(PLAIN_FIELDS)
 

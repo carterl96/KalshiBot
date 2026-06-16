@@ -15,10 +15,12 @@ type Form = {
   min_edge: string;
   fee_buffer: string;
   vol_lookback_s: string;
+  alert_equity_drop_pct: string;
   kalshi_api_key_id: string;
   kalshi_private_key: string;
   anthropic_api_key: string;
   gemini_api_key: string;
+  alert_webhook_url: string;
 };
 
 const SECRET_KEYS = [
@@ -26,6 +28,7 @@ const SECRET_KEYS = [
   "kalshi_private_key",
   "anthropic_api_key",
   "gemini_api_key",
+  "alert_webhook_url",
 ] as const;
 
 const input =
@@ -102,6 +105,7 @@ export default function SetupPage() {
   const [cleared, setCleared] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState("");
   const [test, setTest] = useState<ConnTest | null>(null);
+  const [alertTest, setAlertTest] = useState<{ ok: boolean; enabled: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
 
   function hydrate(v: SettingsView) {
@@ -116,10 +120,12 @@ export default function SetupPage() {
       min_edge: v.min_edge?.toString() ?? "0.04",
       fee_buffer: v.fee_buffer?.toString() ?? "0.02",
       vol_lookback_s: v.vol_lookback_s?.toString() ?? "900",
+      alert_equity_drop_pct: v.alert_equity_drop_pct?.toString() ?? "5",
       kalshi_api_key_id: "",
       kalshi_private_key: "",
       anthropic_api_key: "",
       gemini_api_key: "",
+      alert_webhook_url: "",
     });
     setCleared(new Set());
   }
@@ -152,6 +158,7 @@ export default function SetupPage() {
       min_edge: parseFloat(form.min_edge),
       fee_buffer: parseFloat(form.fee_buffer),
       vol_lookback_s: parseInt(form.vol_lookback_s, 10),
+      alert_equity_drop_pct: parseFloat(form.alert_equity_drop_pct),
     };
     for (const key of SECRET_KEYS) {
       if (cleared.has(key)) payload[key] = "__clear__";
@@ -174,6 +181,15 @@ export default function SetupPage() {
       setTest(await api.testConnection());
     } catch (e: any) {
       setTest({ ok: false, detail: e?.message });
+    }
+  }
+
+  async function runAlertTest() {
+    setAlertTest(null);
+    try {
+      setAlertTest(await api.testAlert());
+    } catch (e: any) {
+      setAlertTest({ ok: false, enabled: false });
     }
   }
 
@@ -280,6 +296,40 @@ export default function SetupPage() {
               onChange={(v) => set("gemini_api_key", v)}
               onClear={() => clearSecret("gemini_api_key")}
             />
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Alerts (optional)">
+        <div className="space-y-4">
+          <SecretInput
+            label="Webhook URL (Discord / Slack)"
+            meta={view?.alert_webhook_url}
+            value={form.alert_webhook_url}
+            onChange={(v) => set("alert_webhook_url", v)}
+            onClear={() => clearSecret("alert_webhook_url")}
+            placeholder="Paste a Discord/Slack incoming webhook URL to receive alerts."
+          />
+          <Field label="Equity drop alert threshold (%)" hint="fire alert when equity drops this % from peak">
+            <input
+              type="number"
+              step="0.5"
+              value={form.alert_equity_drop_pct}
+              onChange={(e) => set("alert_equity_drop_pct", e.target.value)}
+              className={`${input} num`}
+            />
+          </Field>
+          <div className="flex items-center gap-3">
+            <Button onClick={runAlertTest}>Test alert</Button>
+            {alertTest && (
+              <Badge tone={alertTest.ok ? "pos" : "neg"}>
+                {alertTest.ok
+                  ? alertTest.enabled
+                    ? "Alert sent ✓"
+                    : "No webhook set (logged only)"
+                  : "Failed"}
+              </Badge>
+            )}
           </div>
         </div>
       </Card>

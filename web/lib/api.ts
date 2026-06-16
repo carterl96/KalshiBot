@@ -122,10 +122,12 @@ export interface SettingsView {
   min_edge: number | null;
   fee_buffer: number | null;
   vol_lookback_s: number | null;
+  alert_equity_drop_pct: number | null;
   kalshi_api_key_id: SecretField;
   kalshi_private_key: SecretField;
   anthropic_api_key: SecretField;
   gemini_api_key: SecretField;
+  alert_webhook_url: SecretField;
 }
 
 export interface ConnTest {
@@ -232,6 +234,12 @@ export const api = {
     ),
   testConnection: () =>
     req<ConnTest>("/api/settings/test", { method: "POST" }, true),
+  testAlert: () =>
+    req<{ ok: boolean; enabled: boolean }>(
+      "/api/alerts/test",
+      { method: "POST" },
+      true
+    ),
   getCalibration: () => req<CalibrationData>("/api/calibration"),
   getProposals: () => req<Proposal[]>("/api/proposals", {}, true),
   applyProposal: (id: number) =>
