@@ -82,6 +82,31 @@ class AppSetting(Base):
     value: Mapped[str] = mapped_column(Text, default="")
 
 
+class MarketTick(Base):
+    """One snapshot of a market for backtesting data collection."""
+
+    __tablename__ = "market_ticks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    ts: Mapped[float] = mapped_column(Float, index=True)
+    strike: Mapped[float] = mapped_column(Float)
+    spot: Mapped[float] = mapped_column(Float)
+    sigma: Mapped[float] = mapped_column(Float)
+    tau: Mapped[float] = mapped_column(Float)
+    ask_cents: Mapped[int] = mapped_column(Integer)
+    model_prob: Mapped[float] = mapped_column(Float)
+    outcome: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "ticker": self.ticker, "side": self.side,
+            "ts": self.ts, "strike": self.strike, "spot": self.spot,
+            "sigma": self.sigma, "tau": self.tau, "ask_cents": self.ask_cents,
+            "model_prob": self.model_prob, "outcome": self.outcome,
+        }
+
+
 class Prediction(Base):
     """A single model probability prediction, resolved after settlement."""
 
@@ -175,6 +200,48 @@ class Store:
             )
             rows = [r.to_dict() for r in res.scalars().all()]
             return list(reversed(rows))
+
+    # ---- market ticks (backtest data) ----
+
+    async def add_tick(self, **kw) -> None:
+        async with self.session() as s:
+            s.add(MarketTick(**kw))
+            await s.commit()
+
+    async def resolve_ticks(self, ticker: str, up_wins: bool) -> None:
+        now = time.time()
+        async with self.session() as s:
+            res = await s.execute(
+                select(MarketTick)
+                .where(MarketTick.ticker == ticker)
+                .where(MarketTick.outcome.is_(None))
+            )
+            for row in res.scalars().all():
+                row.outcome = (
+                    1 if (row.side == "up" and up_wins) or (row.side == "down" and not up_wins) else 0
+                )
+            await s.commit()
+
+    async def get_ticks(self, ticker: str, limit: int = 5000) -> list[dict]:
+        async with self.session() as s:
+            res = await s.execute(
+                select(MarketTick)
+                .where(MarketTick.ticker == ticker)
+                .order_by(MarketTick.ts.asc())
+                .limit(limit)
+            )
+            return [r.to_dict() for r in res.scalars().all()]
+
+    async def get_ticks_for_series(self, series_prefix: str, limit: int = 10000) -> list[dict]:
+        async with self.session() as s:
+            res = await s.execute(
+                select(MarketTick)
+                .where(MarketTick.ticker.like(f"{series_prefix}%"))
+                .where(MarketTick.outcome.is_not(None))
+                .order_by(MarketTick.ts.asc())
+                .limit(limit)
+            )
+            return [r.to_dict() for r in res.scalars().all()]
 
     # ---- predictions ----
 

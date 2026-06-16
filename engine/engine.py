@@ -35,6 +35,7 @@ from engine.markets import MarketInfo, MarketManager
 from engine.pricing.model import VolEstimator
 from engine.risk.limits import RiskEngine, RiskParams
 from engine.strategy.edge import Signal, evaluate
+from engine.data.tick_collector import TickCollector
 from engine.telemetry.calibration import CalibrationTracker
 from engine.telemetry.store import Store
 
@@ -79,6 +80,9 @@ class TradingEngine:
         self.alerts = AlertManager(
             webhook_url=settings.alert_webhook_url,
         )
+
+        # Tick collector: persists market snapshots to DB for backtesting.
+        self.tick_collector = TickCollector(store, interval_s=60.0)
 
         # Risk params persist across settings reloads (managed from Controls).
         self.risk = RiskEngine(
@@ -301,6 +305,16 @@ class TradingEngine:
                         asyncio.create_task(
                             self.store.add_prediction(m.ticker, side, sig.model_prob)
                         )
+                    # Persist tick snapshot for backtest data collection.
+                    ask_c = round(sig.ask_prob * 100)
+                    asyncio.create_task(
+                        self.tick_collector.record(
+                            ticker=m.ticker, side=side,
+                            strike=m.strike, spot=spot or 0.0,
+                            sigma=sigma, tau=tau,
+                            ask_cents=ask_c, model_prob=sig.model_prob,
+                        )
+                    )
 
             # --- Phase 2: near-close exits (check before new entries) ---
             for side, sig in sigs.items():
@@ -474,9 +488,10 @@ class TradingEngine:
             return
         pnl = self.orders.settle(ticker, up_wins)
         self.risk.record_realized(pnl)
-        # Resolve calibration predictions.
+        # Resolve calibration predictions and tick snapshots.
         self.calibration.resolve(ticker, up_wins)
         await self.store.resolve_predictions(ticker, up_wins)
+        await self.store.resolve_ticks(ticker, up_wins)
         # Mark window closed so state machine resets for next window.
         self.window_mgr.settle(ticker)
         await self.store.add_trade(

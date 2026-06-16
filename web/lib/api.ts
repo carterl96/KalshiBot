@@ -240,6 +240,14 @@ export const api = {
       { method: "POST" },
       true
     ),
+  getTicks: (params: { ticker?: string; series?: string; limit?: number }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v != null)
+        .map(([k, v]) => [k, String(v)])
+    ).toString();
+    return req<Record<string, unknown>[]>(`/api/ticks?${qs}`, {}, true);
+  },
   getCalibration: () => req<CalibrationData>("/api/calibration"),
   getProposals: () => req<Proposal[]>("/api/proposals", {}, true),
   applyProposal: (id: number) =>
