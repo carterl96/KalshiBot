@@ -245,6 +245,14 @@ async def dismiss_proposal(proposal_id: int, _: None = Depends(require_auth)):
     return {"ok": True}
 
 
+# ---- alerts ----
+@app.post("/api/alerts/test")
+async def test_alert(_: None = Depends(require_auth)):
+    eng = get_engine()
+    ok = await eng.alerts.test()
+    return {"ok": ok, "enabled": eng.alerts.enabled}
+
+
 # ---- websocket stream ----
 @app.websocket("/api/stream")
 async def stream(ws: WebSocket):

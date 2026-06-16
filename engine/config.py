@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="")
     llm_enabled: bool = Field(default=False)
 
+    # --- Alerts (optional) ---
+    # Discord/Slack-compatible incoming webhook URL.
+    alert_webhook_url: str = Field(default="")
+    # Fire an equity-drop alert when equity falls this many % from last high.
+    alert_equity_drop_pct: float = Field(default=5.0)
+
     # --- Persistence ---
     database_url: str = Field(default="sqlite+aiosqlite:///./kalshibot.db")
 

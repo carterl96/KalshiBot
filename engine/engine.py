@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from engine.alerts import AlertManager
 from engine.auth.rest_client import KalshiRestClient
 from engine.auth.signer import KalshiSigner
 from engine.config import Settings
@@ -74,6 +75,11 @@ class TradingEngine:
         self.calibration = CalibrationTracker()
         self._llm_proposal_counter = 0   # run proposals every N LLM cycles
 
+        # Alert manager (fires webhooks on kill/breaker/loss events).
+        self.alerts = AlertManager(
+            webhook_url=settings.alert_webhook_url,
+        )
+
         # Risk params persist across settings reloads (managed from Controls).
         self.risk = RiskEngine(
             RiskParams(
@@ -109,6 +115,7 @@ class TradingEngine:
             anthropic_key=settings.anthropic_api_key,
             gemini_key=settings.gemini_api_key,
         )
+        self.alerts = AlertManager(webhook_url=settings.alert_webhook_url)
 
     async def apply_settings(self, settings: Settings) -> None:
         """Swap in new effective settings, rebuilding clients. Restarts the
@@ -118,6 +125,7 @@ class TradingEngine:
             await self.stop()
         await self.rest.close()
         await self.llm.close()
+        await self.alerts.close()
         self._build_from_settings(settings)
         log.info("Settings applied (env=%s, has_creds=%s)",
                  settings.kalshi_env, self.signer is not None)
@@ -173,6 +181,7 @@ class TradingEngine:
         ]
         log.info("Engine started in %s mode", self.mode)
         await self.broadcast_state()
+        asyncio.create_task(self.alerts.engine_started(self.mode))
 
     async def stop(self) -> None:
         self.running = False
@@ -188,11 +197,13 @@ class TradingEngine:
         await self.kalshi_ws.stop()
         log.info("Engine stopped")
         await self.broadcast_state()
+        asyncio.create_task(self.alerts.engine_stopped())
 
     async def shutdown(self) -> None:
         await self.stop()
         await self.rest.close()
         await self.llm.close()
+        await self.alerts.close()
 
     async def set_mode(self, mode: str) -> None:
         if mode not in ("paper", "live"):
@@ -207,6 +218,8 @@ class TradingEngine:
     def kill_switch(self) -> None:
         """Engage the kill switch: block entries and flatten on next settle."""
         self.risk.trip_kill_switch()
+        n_pos = sum(1 for p in self.orders.positions.values() if p.quantity > 0)
+        asyncio.create_task(self.alerts.kill_switch(n_pos))
         asyncio.create_task(self._flatten_all())
 
     def reset_risk(self) -> None:
@@ -253,6 +266,16 @@ class TradingEngine:
             book = self.kalshi_ws.book(m.ticker)
             tau = m.tau_seconds(now)
 
+            # Adjust min_edge per active strategy from the LLM.
+            strategy = self.guidance.active_strategy
+            if strategy == "conservative":
+                effective_min_edge = self.settings.min_edge * 1.5
+            elif strategy == "near_close" and tau > 60:
+                # near_close profile: skip markets with >60s to close
+                continue
+            else:
+                effective_min_edge = self.settings.min_edge
+
             # Compute signals for both sides upfront.
             sigs: dict[str, Signal] = {}
             for side in ("up", "down"):
@@ -264,7 +287,7 @@ class TradingEngine:
                     sigma_annual=sigma,
                     tau_seconds=tau,
                     book=book,
-                    min_edge=self.settings.min_edge,
+                    min_edge=effective_min_edge,
                     fee_buffer=self.settings.fee_buffer,
                 )
                 if sig is not None:
@@ -404,9 +427,20 @@ class TradingEngine:
             await self.kalshi_ws.resubscribe(tickers)
 
     async def _equity_loop(self) -> None:
+        was_broken = False
         while self.running:
             equity = self.orders.equity(self._mark_prices())
             self.risk.record_equity(equity)
+            # Alert if the circuit breaker just tripped this cycle.
+            if self.risk.circuit_broken and not was_broken:
+                peak = self.risk.peak_equity
+                dd = (peak - equity) / peak * 100.0 if peak > 0 else 0.0
+                asyncio.create_task(self.alerts.circuit_breaker(dd))
+            was_broken = self.risk.circuit_broken
+            # Equity-drop alert.
+            asyncio.create_task(
+                self.alerts.check_equity_alert(equity, self.settings.alert_equity_drop_pct)
+            )
             await self.store.add_equity(equity)
             await self.broadcast_state()
             await asyncio.sleep(5)
@@ -449,6 +483,14 @@ class TradingEngine:
             ticker=ticker, side="settle", action="settle", quantity=0,
             price=0.0, mode=self.mode, pnl=pnl, reason=f"up_wins={up_wins}",
         )
+        # Alerts: significant settlement P&L.
+        if abs(pnl) >= 5.0:
+            asyncio.create_task(self.alerts.large_trade_pnl(ticker, pnl))
+        # Alert if daily loss limit just became binding.
+        if self.risk.realized_today <= -abs(self.risk.params.daily_loss_limit):
+            asyncio.create_task(
+                self.alerts.daily_loss_limit(abs(self.risk.realized_today))
+            )
         await self.broadcast_state()
 
     async def _llm_loop(self) -> None:
