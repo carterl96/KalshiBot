@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { RiskParams, api } from "@/lib/api";
+import { Proposal, RiskParams, api } from "@/lib/api";
 import { useEngine } from "@/lib/store";
-import { Badge, Button, Card } from "@/components/ui";
+import { Badge, Button, Card, Empty } from "@/components/ui";
+import { ago } from "@/lib/format";
 
 const RISK_FIELDS: { key: keyof RiskParams; label: string; hint: string }[] = [
   { key: "max_per_trade", label: "Max per trade ($)", hint: "single order cap" },
@@ -19,6 +20,36 @@ export default function ControlsPage() {
   const [risk, setRisk] = useState<RiskParams | null>(null);
   const [msg, setMsg] = useState("");
   const [confirmLive, setConfirmLive] = useState(false);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+
+  useEffect(() => {
+    const load = () =>
+      api
+        .getProposals()
+        .then(setProposals)
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function handleProposal(id: number, action: "apply" | "dismiss") {
+    try {
+      if (action === "apply") {
+        const result = await api.applyProposal(id);
+        const keys = Object.keys(result.applied_params).join(", ");
+        setMsg(`Proposal applied — updated: ${keys} ✓`);
+        api.getRisk().then(setRisk).catch(() => {});
+      } else {
+        await api.dismissProposal(id);
+        setMsg("Proposal dismissed.");
+      }
+      api.getProposals().then(setProposals).catch(() => {});
+      refresh();
+    } catch (e: any) {
+      setMsg(`Failed: ${e?.message}`);
+    }
+  }
 
   useEffect(() => {
     api.getRisk().then(setRisk).catch(() => setRisk(null));
@@ -144,6 +175,83 @@ export default function ControlsPage() {
               </Button>
             </div>
           </>
+        )}
+      </Card>
+
+      <Card title="AI parameter proposals">
+        {proposals.length === 0 ? (
+          <Empty>
+            No proposals yet — the LLM will suggest parameter tweaks after
+            enough trades have resolved.
+          </Empty>
+        ) : (
+          <div className="space-y-3">
+            {proposals.map((p) => {
+              let params: Record<string, number> = {};
+              try {
+                params = JSON.parse(p.params_json);
+              } catch {
+                /* ignore */
+              }
+              return (
+                <div
+                  key={p.id}
+                  className={`rounded-lg border p-4 ${
+                    p.status === "pending"
+                      ? "border-accent/30 bg-accent/5"
+                      : "border-line bg-bg-soft opacity-60"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1">
+                      <p className="text-sm">{p.description}</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {Object.entries(params).map(([k, v]) => (
+                          <span
+                            key={k}
+                            className="rounded bg-bg-hover px-2 py-0.5 font-mono text-xs"
+                          >
+                            {k}: {typeof v === "number" ? v.toFixed(4) : String(v)}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted">
+                        <span>{ago(p.created_at)}</span>
+                        <span>·</span>
+                        <span>{p.suggested_by}</span>
+                        {p.status !== "pending" && (
+                          <>
+                            <span>·</span>
+                            <Badge
+                              tone={p.status === "applied" ? "pos" : "muted"}
+                            >
+                              {p.status}
+                            </Badge>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {p.status === "pending" && (
+                      <div className="flex gap-2">
+                        <Button
+                          tone="primary"
+                          onClick={() => handleProposal(p.id, "apply")}
+                        >
+                          Apply
+                        </Button>
+                        <Button
+                          tone="ghost"
+                          onClick={() => handleProposal(p.id, "dismiss")}
+                        >
+                          Dismiss
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </Card>
 

@@ -33,10 +33,12 @@ export function Card({
 export function Stat({
   label,
   value,
+  hint,
   className = "",
 }: {
   label: string;
   value: ReactNode;
+  hint?: string;
   className?: string;
 }) {
   return (
@@ -45,6 +47,7 @@ export function Stat({
       <div className={`mt-1 font-mono text-2xl font-semibold ${className}`}>
         {value}
       </div>
+      {hint && <div className="mt-1 text-[10px] text-muted">{hint}</div>}
     </div>
   );
 }

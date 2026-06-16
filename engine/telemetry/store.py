@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from sqlalchemy import Float, Integer, String, Text, select
+from sqlalchemy import Float, Integer, String, Text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -82,6 +82,45 @@ class AppSetting(Base):
     value: Mapped[str] = mapped_column(Text, default="")
 
 
+class Prediction(Base):
+    """A single model probability prediction, resolved after settlement."""
+
+    __tablename__ = "predictions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    model_prob: Mapped[float] = mapped_column(Float)
+    predicted_at: Mapped[float] = mapped_column(Float, index=True)
+    outcome: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    resolved_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "ticker": self.ticker, "side": self.side,
+            "model_prob": self.model_prob, "predicted_at": self.predicted_at,
+            "outcome": self.outcome, "resolved_at": self.resolved_at,
+        }
+
+
+class Proposal(Base):
+    """LLM-generated parameter-tuning proposal surfaced in the admin UI."""
+
+    __tablename__ = "proposals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[float] = mapped_column(Float, index=True)
+    suggested_by: Mapped[str] = mapped_column(String(32), default="llm")
+    description: Mapped[str] = mapped_column(Text, default="")
+    params_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|applied|dismissed
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "created_at": self.created_at,
+            "suggested_by": self.suggested_by, "description": self.description,
+            "params_json": self.params_json, "status": self.status,
+        }
+
+
 class Store:
     def __init__(self, database_url: str):
         self.engine = create_async_engine(database_url, future=True)
@@ -136,6 +175,92 @@ class Store:
             )
             rows = [r.to_dict() for r in res.scalars().all()]
             return list(reversed(rows))
+
+    # ---- predictions ----
+
+    async def add_prediction(self, ticker: str, side: str, model_prob: float) -> None:
+        async with self.session() as s:
+            s.add(Prediction(
+                ticker=ticker, side=side, model_prob=model_prob,
+                predicted_at=time.time(),
+            ))
+            await s.commit()
+
+    async def resolve_predictions(self, ticker: str, up_wins: bool) -> int:
+        """Set outcome on all unresolved predictions for ``ticker``.
+
+        Returns the number of records updated.
+        """
+        now = time.time()
+        async with self.session() as s:
+            # Load unresolved predictions for this ticker.
+            res = await s.execute(
+                select(Prediction)
+                .where(Prediction.ticker == ticker)
+                .where(Prediction.outcome.is_(None))
+            )
+            rows = res.scalars().all()
+            for row in rows:
+                row.outcome = (
+                    1 if (row.side == "up" and up_wins) or (row.side == "down" and not up_wins) else 0
+                )
+                row.resolved_at = now
+            await s.commit()
+            return len(rows)
+
+    async def recent_predictions(self, limit: int = 200) -> list[dict]:
+        async with self.session() as s:
+            res = await s.execute(
+                select(Prediction)
+                .where(Prediction.outcome.is_not(None))
+                .order_by(Prediction.predicted_at.desc())
+                .limit(limit)
+            )
+            return [r.to_dict() for r in res.scalars().all()]
+
+    async def brier_score_db(self, n: int = 200) -> Optional[float]:
+        rows = await self.recent_predictions(n)
+        if not rows:
+            return None
+        errors = [(r["model_prob"] - r["outcome"]) ** 2 for r in rows]
+        return round(sum(errors) / len(errors), 4)
+
+    # ---- proposals ----
+
+    async def add_proposal(
+        self,
+        description: str,
+        params_json: str,
+        suggested_by: str = "llm",
+    ) -> dict:
+        async with self.session() as s:
+            row = Proposal(
+                created_at=time.time(),
+                suggested_by=suggested_by,
+                description=description,
+                params_json=params_json,
+                status="pending",
+            )
+            s.add(row)
+            await s.commit()
+            return row.to_dict()
+
+    async def list_proposals(self, status: Optional[str] = None) -> list[dict]:
+        async with self.session() as s:
+            q = select(Proposal).order_by(Proposal.created_at.desc())
+            if status:
+                q = q.where(Proposal.status == status)
+            res = await s.execute(q)
+            return [r.to_dict() for r in res.scalars().all()]
+
+    async def update_proposal_status(self, proposal_id: int, status: str) -> bool:
+        async with self.session() as s:
+            row = await s.get(Proposal, proposal_id)
+            if row is None:
+                return False
+            row.status = status
+            await s.commit()
+            return True
 
     async def get_app_settings(self) -> dict[str, str]:
         async with self.session() as s:

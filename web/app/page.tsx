@@ -10,13 +10,78 @@ import {
   YAxis,
 } from "recharts";
 import { useEngine } from "@/lib/store";
-import { EquityPoint, api } from "@/lib/api";
+import { CalibrationData, EquityPoint, api } from "@/lib/api";
 import { Card, Empty, Stat } from "@/components/ui";
 import { pnlClass, signed, ts, usd } from "@/lib/format";
+
+function CalibrationCard({ cal }: { cal: CalibrationData | null }) {
+  if (!cal) return null;
+  const brier = cal.brier_score ?? cal.brier_score_db;
+  return (
+    <Card title="Model calibration">
+      <div className="grid grid-cols-3 gap-4">
+        <Stat
+          label="Brier score"
+          value={brier != null ? brier.toFixed(4) : "—"}
+          hint="lower is better; 0.25 = random"
+        />
+        <Stat label="Resolved predictions" value={String(cal.resolution_count)} />
+        <Stat
+          label="Sharpness"
+          value={`${(cal.sharpness * 100).toFixed(0)}%`}
+          hint="fraction of extreme predictions (>70% or <30%)"
+        />
+      </div>
+      {cal.bands.some((b) => b.count > 0) && (
+        <div className="mt-4 overflow-x-auto">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Predicted range</th>
+                <th>Predicted mid</th>
+                <th>Actual rate</th>
+                <th>Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cal.bands
+                .filter((b) => b.count > 0)
+                .map((b) => {
+                  const diff =
+                    b.actual != null ? b.actual - b.predicted : null;
+                  return (
+                    <tr key={b.bucket}>
+                      <td className="num">{b.bucket}</td>
+                      <td className="num">{(b.predicted * 100).toFixed(0)}%</td>
+                      <td
+                        className={`num ${
+                          diff == null
+                            ? ""
+                            : Math.abs(diff) < 0.05
+                            ? "text-pos"
+                            : "text-neg"
+                        }`}
+                      >
+                        {b.actual != null
+                          ? `${(b.actual * 100).toFixed(1)}%`
+                          : "—"}
+                      </td>
+                      <td className="num">{b.count}</td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 export default function Dashboard() {
   const { state } = useEngine();
   const [curve, setCurve] = useState<EquityPoint[]>([]);
+  const [cal, setCal] = useState<CalibrationData | null>(null);
 
   useEffect(() => {
     const load = () =>
@@ -28,6 +93,13 @@ export default function Dashboard() {
         .catch(() => setCurve([]));
     load();
     const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const load = () => api.getCalibration().then(setCal).catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, []);
 
@@ -92,6 +164,8 @@ export default function Dashboard() {
           </div>
         )}
       </Card>
+
+      <CalibrationCard cal={cal} />
 
       <Card title="Open positions">
         {!state || state.positions.length === 0 ? (
