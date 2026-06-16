@@ -48,6 +48,19 @@ SYSTEM_PROMPT = (
     "Be conservative after losses; risk_dial < 1 reduces position sizes."
 )
 
+PROPOSAL_SYSTEM = (
+    "You are a quantitative analyst reviewing a trading bot's calibration data "
+    "and recent losses. Propose parameter adjustments to improve edge and EV. "
+    "Respond ONLY with JSON: "
+    '{"description": "<1-2 sentences explaining why>", '
+    '"params": {"min_edge": <float|null>, "kelly_fraction": <float|null>, '
+    '"fee_buffer": <float|null>, "vol_lookback_s": <int|null>, '
+    '"max_per_trade": <float|null>, "max_per_window": <float|null>}}. '
+    "Omit any param you do not want to change (set it to null). "
+    "Only suggest changes that are grounded in the data. "
+    "Be conservative — small incremental improvements, not wild swings."
+)
+
 
 @dataclass
 class MetaGuidance:
@@ -65,6 +78,22 @@ class MetaGuidance:
             "note": self.note,
             "source": self.source,
         }
+
+
+def _parse_proposal(text: str) -> dict | None:
+    try:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        obj = json.loads(text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    desc = str(obj.get("description", ""))
+    params_raw = obj.get("params", {}) or {}
+    # Strip None values — keep only proposed changes.
+    params = {k: v for k, v in params_raw.items() if v is not None}
+    if not desc or not params:
+        return None
+    return {"description": desc, "params": params}
 
 
 def _parse_guidance(text: str, source: str) -> MetaGuidance | None:
@@ -164,6 +193,75 @@ class LLMMetaLayer:
             return _parse_guidance(text, "claude")
         except Exception as exc:  # noqa: BLE001
             log.warning("Claude advise failed: %s", exc)
+            return None
+
+    async def propose_params(self, calibration_summary: dict, recent_losses: list[dict]) -> dict | None:
+        """Ask the LLM to review calibration data and propose parameter tweaks.
+
+        Returns a dict with ``description`` and ``params`` (partial dict of
+        parameter overrides), or None if the call failed or LLM is disabled.
+        """
+        if not self.enabled:
+            return None
+        prompt = json.dumps(
+            {"calibration": calibration_summary, "recent_losses": recent_losses},
+            default=str,
+        )[:6000]
+        if self.anthropic_key:
+            return await self._ask_claude_proposal(prompt)
+        if self.gemini_key:
+            return await self._ask_gemini_proposal(prompt)
+        return None
+
+    async def _ask_claude_proposal(self, prompt: str) -> dict | None:
+        try:
+            resp = await self._client.post(
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": self.anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.claude_model,
+                    "max_tokens": 512,
+                    "system": PROPOSAL_SYSTEM,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = "".join(
+                block.get("text", "") for block in data.get("content", [])
+            )
+            return _parse_proposal(text)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Claude proposal failed: %s", exc)
+            return None
+
+    async def _ask_gemini_proposal(self, prompt: str) -> dict | None:
+        try:
+            url = GEMINI_URL.format(model=self.gemini_model)
+            resp = await self._client.post(
+                url,
+                params={"key": self.gemini_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": PROPOSAL_SYSTEM}]},
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 512},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+            return _parse_proposal(text)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Gemini proposal failed: %s", exc)
             return None
 
     async def _ask_gemini(self, prompt: str) -> MetaGuidance | None:

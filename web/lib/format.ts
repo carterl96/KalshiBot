@@ -7,8 +7,8 @@ export const pct = (n: number | null | undefined, digits = 1) =>
 export const cents = (n: number | null | undefined) =>
   n == null ? "—" : `${n}¢`;
 
-export const signed = (n: number | null | undefined) =>
-  n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
+export const signed = (n: number | null | undefined, digits = 2) =>
+  n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
 
 export const pnlClass = (n: number | null | undefined) =>
   n == null ? "" : n > 0 ? "text-pos" : n < 0 ? "text-neg" : "text-muted";

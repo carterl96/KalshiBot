@@ -135,6 +135,31 @@ export interface ConnTest {
   balance_usd?: number;
 }
 
+export interface CalibrationBand {
+  bucket: string;
+  predicted: number;
+  actual: number | null;
+  count: number;
+}
+
+export interface CalibrationData {
+  brier_score: number | null;
+  brier_score_db: number | null;
+  resolution_count: number;
+  pending_count: number;
+  sharpness: number;
+  bands: CalibrationBand[];
+}
+
+export interface Proposal {
+  id: number;
+  created_at: number;
+  suggested_by: string;
+  description: string;
+  params_json: string;
+  status: "pending" | "applied" | "dismissed";
+}
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -207,6 +232,16 @@ export const api = {
     ),
   testConnection: () =>
     req<ConnTest>("/api/settings/test", { method: "POST" }, true),
+  getCalibration: () => req<CalibrationData>("/api/calibration"),
+  getProposals: () => req<Proposal[]>("/api/proposals", {}, true),
+  applyProposal: (id: number) =>
+    req<{ ok: boolean; applied_params: Record<string, number> }>(
+      `/api/proposals/${id}/apply`,
+      { method: "POST" },
+      true
+    ),
+  dismissProposal: (id: number) =>
+    req<{ ok: boolean }>(`/api/proposals/${id}/dismiss`, { method: "POST" }, true),
 };
 
 export { ApiError };

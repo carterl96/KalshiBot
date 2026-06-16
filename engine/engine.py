@@ -28,11 +28,13 @@ from engine.config import Settings
 from engine.data.kalshi_ws import KalshiWS, OrderBook
 from engine.data.spot import SpotFeed
 from engine.execution.orders import OrderManager
+from engine.execution.window import WindowManager
 from engine.llm.meta import LLMMetaLayer, MetaGuidance
 from engine.markets import MarketInfo, MarketManager
 from engine.pricing.model import VolEstimator
 from engine.risk.limits import RiskEngine, RiskParams
 from engine.strategy.edge import Signal, evaluate
+from engine.telemetry.calibration import CalibrationTracker
 from engine.telemetry.store import Store
 
 log = logging.getLogger("engine")
@@ -66,6 +68,11 @@ class TradingEngine:
         # Latest evaluated signals for the markets view.
         self.signals: dict[str, Signal] = {}
         self.guidance = MetaGuidance()
+
+        # Phase 2: window state machine + calibration tracker.
+        self.window_mgr = WindowManager()
+        self.calibration = CalibrationTracker()
+        self._llm_proposal_counter = 0   # run proposals every N LLM cycles
 
         # Risk params persist across settings reloads (managed from Controls).
         self.risk = RiskEngine(
@@ -245,6 +252,9 @@ class TradingEngine:
                 continue
             book = self.kalshi_ws.book(m.ticker)
             tau = m.tau_seconds(now)
+
+            # Compute signals for both sides upfront.
+            sigs: dict[str, Signal] = {}
             for side in ("up", "down"):
                 sig = evaluate(
                     ticker=m.ticker,
@@ -257,13 +267,66 @@ class TradingEngine:
                     min_edge=self.settings.min_edge,
                     fee_buffer=self.settings.fee_buffer,
                 )
-                if sig is None:
-                    continue
-                self.signals[f"{m.ticker}:{side}"] = sig
-                if sig.tradeable:
-                    await self._act_on_signal(m, sig)
+                if sig is not None:
+                    self.signals[f"{m.ticker}:{side}"] = sig
+                    sigs[side] = sig
+                    # Record prediction in memory and (deduped) in DB.
+                    is_new = self.calibration.pending_count()  # before
+                    self.calibration.record_prediction(m.ticker, side, sig.model_prob)
+                    if self.calibration.pending_count() > is_new:
+                        # A new record was appended — persist to DB.
+                        asyncio.create_task(
+                            self.store.add_prediction(m.ticker, side, sig.model_prob)
+                        )
 
-    async def _act_on_signal(self, market: MarketInfo, sig: Signal) -> None:
+            # --- Phase 2: near-close exits (check before new entries) ---
+            for side, sig in sigs.items():
+                pos = self.orders.position(m.ticker, side)
+                if pos.quantity > 0:
+                    if self.window_mgr.should_take_profit(m.ticker, side, sig.model_prob, tau):
+                        await self._close_position(m, pos, side, book, "take_profit")
+                    elif self.window_mgr.should_cut_loss(m.ticker, side, sig.model_prob, tau):
+                        await self._close_position(m, pos, side, book, "cut_loss")
+
+            # --- New entries / scale-ins / hedges ---
+            for side, sig in sigs.items():
+                if not sig.tradeable:
+                    await self._log_skip(m, sig)
+                    continue
+
+                opposite = "down" if side == "up" else "up"
+                opp_sig = sigs.get(opposite)
+
+                # Hedge: we're in the opposite direction and model has turned.
+                if (
+                    self.orders.position(m.ticker, opposite).quantity > 0
+                    and opp_sig is not None
+                    and self.window_mgr.should_hedge(m.ticker, sig.model_prob)
+                ):
+                    await self._act_on_signal(m, sig, label="hedge")
+                    continue
+
+                # Fresh entry or scale-in (same direction).
+                if self.window_mgr.can_entry(m.ticker, side) or self.window_mgr.can_scale_in(m.ticker, side):
+                    label = self.window_mgr.entry_label(m.ticker, side)
+                    await self._act_on_signal(m, sig, label=label)
+
+        # Periodic cleanup of stale window states.
+        self.window_mgr.cleanup_old()
+
+    async def _close_position(
+        self, market: MarketInfo, pos, side: str, book, reason: str
+    ) -> None:
+        """Sell an open position early (profit-take or stop-loss)."""
+        bid = book.yes_bid_ask()[0] if side == "up" else book.no_bid_ask()[0]
+        price = (bid / 100.0) if bid else pos.avg_price
+        res = await self.orders.sell(pos.ticker, side, pos.quantity, price, reason=reason)
+        if res.ok:
+            await self._log_trade(res)
+            log.info("[window] closed %s:%s reason=%s pnl≈%.2f",
+                     market.ticker, side, reason, res.quantity * (price - pos.avg_price))
+
+    async def _act_on_signal(self, market: MarketInfo, sig: Signal, label: str = "entry") -> None:
         equity = self.orders.equity(self._mark_prices())
         self.risk.record_equity(equity)
         check = self.risk.check(
@@ -278,25 +341,44 @@ class TradingEngine:
         action_taken = ""
         if check.ok and qty >= 1:
             res = await self.orders.buy(
-                market.ticker, sig.side, qty, sig.ask_prob, reason=sig.reason
+                market.ticker, sig.side, qty, sig.ask_prob,
+                reason=f"{label}:{sig.reason}",
             )
             if res.ok:
-                action_taken = f"buy {qty} {sig.side}"
+                action_taken = f"{label} {qty} {sig.side}"
                 await self._log_trade(res)
+                # Record entry in window state machine.
+                if label == "hedge":
+                    self.window_mgr.record_hedge(market.ticker)
+                else:
+                    self.window_mgr.record_entry(market.ticker, sig.side)
+
         await self.store.add_decision(
             ticker=market.ticker,
-            decision="tradeable" if sig.tradeable else "skip",
+            decision="tradeable",
             model_prob=sig.model_prob,
             market_price=sig.ask_prob,
             edge=sig.edge,
             action_taken=action_taken or (check.reason if not check.ok else "no size"),
             source="quant",
-            detail=f"imbalance={sig.imbalance:.2f} near_close={sig.near_close}",
+            detail=f"label={label} imbalance={sig.imbalance:.2f} near_close={sig.near_close}",
         )
         await self._broadcast({"type": "decision", "data": {
             "ticker": market.ticker, "edge": sig.edge, "model_prob": sig.model_prob,
-            "action": action_taken,
+            "action": action_taken, "label": label,
         }})
+
+    async def _log_skip(self, market: MarketInfo, sig: Signal) -> None:
+        await self.store.add_decision(
+            ticker=market.ticker,
+            decision="skip",
+            model_prob=sig.model_prob,
+            market_price=sig.ask_prob,
+            edge=sig.edge,
+            action_taken="",
+            source="quant",
+            detail=sig.reason,
+        )
 
     def _mark_prices(self) -> dict[str, float]:
         marks: dict[str, float] = {}
@@ -358,6 +440,11 @@ class TradingEngine:
             return
         pnl = self.orders.settle(ticker, up_wins)
         self.risk.record_realized(pnl)
+        # Resolve calibration predictions.
+        self.calibration.resolve(ticker, up_wins)
+        await self.store.resolve_predictions(ticker, up_wins)
+        # Mark window closed so state machine resets for next window.
+        self.window_mgr.settle(ticker)
         await self.store.add_trade(
             ticker=ticker, side="settle", action="settle", quantity=0,
             price=0.0, mode=self.mode, pnl=pnl, reason=f"up_wins={up_wins}",
@@ -379,8 +466,29 @@ class TradingEngine:
                     source="llm", detail=self.guidance.note,
                 )
                 await self.broadcast_state()
+                # Every 10 LLM cycles (approx 5 minutes), generate a parameter
+                # proposal if we have enough calibration data.
+                self._llm_proposal_counter += 1
+                if self._llm_proposal_counter % 10 == 0:
+                    await self._run_proposal_cycle()
             except Exception as exc:  # noqa: BLE001
                 log.warning("llm loop error: %s", exc)
+
+    async def _run_proposal_cycle(self) -> None:
+        """Ask the LLM to propose parameter tweaks based on calibration."""
+        if self.calibration.resolution_count() < 20:
+            return  # not enough data yet
+        cal_summary = self.calibration.summary()
+        losses = self.calibration.recent_losing_trades(n=20)
+        proposal = await self.llm.propose_params(cal_summary, losses)
+        if proposal and proposal.get("params"):
+            import json
+            await self.store.add_proposal(
+                description=proposal["description"],
+                params_json=json.dumps(proposal["params"]),
+                suggested_by=self.guidance.source or "llm",
+            )
+            log.info("LLM proposal stored: %s", proposal["description"][:80])
 
     def _llm_context(self) -> dict:
         return {
@@ -451,6 +559,9 @@ class TradingEngine:
             "kill_switched": self.risk.kill_switched,
             "risk_params": self.risk.params.to_dict(),
         }
+
+    def calibration_snapshot(self) -> dict:
+        return self.calibration.summary()
 
     def health_snapshot(self) -> dict:
         return {

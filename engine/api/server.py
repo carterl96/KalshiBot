@@ -196,6 +196,55 @@ async def test_connection(_: None = Depends(require_auth)):
     return await get_engine().test_connection()
 
 
+# ---- calibration ----
+@app.get("/api/calibration")
+async def get_calibration():
+    """Brier score and calibration band data (no auth — read-only stats)."""
+    eng = get_engine()
+    cal = eng.calibration_snapshot()
+    brier_db = await store.brier_score_db()
+    return {**cal, "brier_score_db": brier_db}
+
+
+# ---- proposals ----
+class ProposalApplyBody(BaseModel):
+    proposal_id: int
+
+
+@app.get("/api/proposals")
+async def list_proposals(_: None = Depends(require_auth)):
+    return await store.list_proposals()
+
+
+@app.post("/api/proposals/{proposal_id}/apply")
+async def apply_proposal(proposal_id: int, _: None = Depends(require_auth)):
+    """Apply a parameter proposal: update risk params and dismiss the record."""
+    import json as _json
+    proposals = await store.list_proposals()
+    row = next((p for p in proposals if p["id"] == proposal_id), None)
+    if not row:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    if row["status"] != "pending":
+        raise HTTPException(status_code=400, detail="proposal already actioned")
+    try:
+        params = _json.loads(row["params_json"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid params JSON")
+    eng = get_engine()
+    eng.risk.params.update(**params)
+    await store.update_proposal_status(proposal_id, "applied")
+    await eng.broadcast_state()
+    return {"ok": True, "applied_params": params}
+
+
+@app.post("/api/proposals/{proposal_id}/dismiss")
+async def dismiss_proposal(proposal_id: int, _: None = Depends(require_auth)):
+    ok = await store.update_proposal_status(proposal_id, "dismissed")
+    if not ok:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    return {"ok": True}
+
+
 # ---- websocket stream ----
 @app.websocket("/api/stream")
 async def stream(ws: WebSocket):
