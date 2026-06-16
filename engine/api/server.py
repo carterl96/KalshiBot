@@ -259,6 +259,25 @@ class BacktestBody(BaseModel):
     params: dict = {}
 
 
+@app.get("/api/ticks")
+async def get_ticks(
+    ticker: str | None = None,
+    series: str | None = None,
+    limit: int = 5000,
+    _: None = Depends(require_auth),
+):
+    """Export stored market tick snapshots for backtesting.
+
+    Pass ``?ticker=KXBTC-001`` for a specific market or
+    ``?series=KXBTC`` for all resolved ticks for a series.
+    """
+    if ticker:
+        return await store.get_ticks(ticker, limit)
+    if series:
+        return await store.get_ticks_for_series(series, limit)
+    raise HTTPException(status_code=422, detail="provide ticker or series query param")
+
+
 @app.post("/api/backtest")
 async def run_backtest(body: BacktestBody, _: None = Depends(require_auth)):
     """Run a backtest over supplied historical ticks.
