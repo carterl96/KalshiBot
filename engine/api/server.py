@@ -253,6 +253,34 @@ async def test_alert(_: None = Depends(require_auth)):
     return {"ok": ok, "enabled": eng.alerts.enabled}
 
 
+# ---- backtest ----
+class BacktestBody(BaseModel):
+    ticks: list[dict]
+    params: dict = {}
+
+
+@app.post("/api/backtest")
+async def run_backtest(body: BacktestBody, _: None = Depends(require_auth)):
+    """Run a backtest over supplied historical ticks.
+
+    The caller provides a list of tick dicts matching the ``Tick`` dataclass
+    fields, plus optional params overrides. Returns a summary dict.
+    """
+    import asyncio as _asyncio
+    from engine.backtest.runner import BacktestParams, BacktestRunner, Tick
+
+    try:
+        bp = BacktestParams(**body.params) if body.params else BacktestParams()
+        tick_objs = [Tick(**t) for t in body.ticks]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # Run synchronously in a thread pool so we don't block the event loop.
+    loop = _asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, BacktestRunner(bp).run, tick_objs)
+    return result.to_dict()
+
+
 # ---- websocket stream ----
 @app.websocket("/api/stream")
 async def stream(ws: WebSocket):

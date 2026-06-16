@@ -14,6 +14,7 @@ const NAV = [
   { href: "/controls", label: "Controls", icon: "⚙" },
   { href: "/ai", label: "AI Log", icon: "✦" },
   { href: "/history", label: "History", icon: "≡" },
+  { href: "/backtest", label: "Backtest", icon: "◎" },
   { href: "/setup", label: "Setup", icon: "⚿" },
 ];
 
