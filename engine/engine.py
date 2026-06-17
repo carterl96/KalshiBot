@@ -177,6 +177,7 @@ class TradingEngine:
         self.running = True
         if self.mode == "live":
             await self.orders.sync_live_balance()
+            await self.orders.reconcile_live_positions()
         self.spot.start()
         self.kalshi_ws.start()
         await self._refresh_markets()
@@ -221,6 +222,14 @@ class TradingEngine:
         self.orders.mode = mode
         if mode == "live":
             await self.orders.sync_live_balance()
+            # Sync the book to real Kalshi positions so stale paper fills don't
+            # leak into live trading.
+            await self.orders.reconcile_live_positions()
+        else:
+            self.orders.reset_positions()
+        # Reset the per-window state machine so stale entries don't block or
+        # confuse the new mode's windows.
+        self.window_mgr = WindowManager()
         # Re-baseline drawdown tracking to the new mode's balance so a large
         # paper<->live balance change isn't misread as a drawdown and trips
         # the circuit breaker.

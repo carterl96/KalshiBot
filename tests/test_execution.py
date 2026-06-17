@@ -31,6 +31,45 @@ async def test_paper_settle_loss():
     assert om.balance == pytest.approx(96.0)
 
 
+class _FakeRest:
+    """Minimal stub mimicking KalshiRestClient for reconcile tests."""
+
+    def __init__(self, positions):
+        self._positions = positions
+        self.signer = object()  # truthy: pretend we have credentials
+
+    async def get_positions(self, **_):
+        return {"market_positions": self._positions}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_positions_maps_kalshi_book():
+    rest = _FakeRest([
+        {"ticker": "MKT-A", "position": 12, "market_exposure": 444},   # long YES
+        {"ticker": "MKT-B", "position": -8, "market_exposure": 240},   # long NO
+        {"ticker": "MKT-C", "position": 0, "market_exposure": 0},      # flat: skip
+    ])
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    # A stale paper position that must be wiped by reconcile.
+    await om.buy("STALE", "up", 5, 0.50)
+    await om.reconcile_live_positions()
+
+    assert "STALE:up" not in om.positions
+    a = om.position("MKT-A", "up")
+    assert a.quantity == 12 and a.avg_price == pytest.approx(0.37)  # 444c/12/100
+    b = om.position("MKT-B", "down")
+    assert b.quantity == 8 and b.avg_price == pytest.approx(0.30)   # 240c/8/100
+    assert "MKT-C:up" not in om.positions and "MKT-C:down" not in om.positions
+
+
+@pytest.mark.asyncio
+async def test_reset_positions_clears_book():
+    om = OrderManager(rest=None, mode="paper", balance=100.0)
+    await om.buy("MKT", "up", 4, 0.25)
+    om.reset_positions()
+    assert om.positions == {}
+
+
 @pytest.mark.asyncio
 async def test_insufficient_balance_rejected():
     om = OrderManager(rest=None, mode="paper", balance=1.0)

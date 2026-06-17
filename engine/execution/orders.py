@@ -214,3 +214,38 @@ class OrderManager:
                 self.balance = float(bal.get("balance", 0)) / 100.0
             except Exception as exc:  # noqa: BLE001
                 log.warning("balance sync failed: %s", exc)
+
+    def reset_positions(self) -> None:
+        """Drop all in-memory positions (used when switching modes so paper
+        positions never leak into live trading, and vice versa)."""
+        self.positions.clear()
+
+    async def reconcile_live_positions(self) -> None:
+        """Replace the in-memory book with the broker's real open positions.
+
+        Called when entering live mode (or starting live) so the engine's view
+        matches the actual Kalshi account instead of stale paper fills. On a
+        fresh account this simply yields an empty book.
+        """
+        self.positions.clear()
+        if not (self.mode == "live" and self.rest and self.rest.signer):
+            return
+        try:
+            resp = await self.rest.get_positions()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("position reconcile failed: %s", exc)
+            return
+        count = 0
+        for mp in resp.get("market_positions", []):
+            ticker = mp.get("ticker")
+            net = int(mp.get("position", 0) or 0)
+            if not ticker or net == 0:
+                continue
+            # Kalshi: positive position = long YES (up), negative = long NO (down).
+            side = "up" if net > 0 else "down"
+            qty = abs(net)
+            exposure_cents = abs(float(mp.get("market_exposure", 0) or 0))
+            avg_price = min(max(exposure_cents / qty / 100.0, 0.0), 1.0) if qty else 0.0
+            self.position(ticker, side).add(qty, avg_price)
+            count += 1
+        log.info("Reconciled %d live position(s) from Kalshi", count)
