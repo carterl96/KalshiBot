@@ -105,6 +105,7 @@ class KalshiWS:
         self._task: Optional[asyncio.Task] = None
         self._cmd_id = 0
         self._ws = None
+        self._logged_types: set[str] = set()
 
     def on_book_update(self, cb: Callable[[str, OrderBook], None]) -> None:
         self._on_update = cb
@@ -203,6 +204,12 @@ class KalshiWS:
         try:
             msg_type = msg.get("type")
             data = msg.get("msg", {})
+            # One-shot diagnostics: log the first snapshot/delta raw so we can
+            # verify Kalshi's exact wire format.
+            if msg_type in ("orderbook_snapshot", "orderbook_delta"):
+                if msg_type not in self._logged_types:
+                    self._logged_types.add(msg_type)
+                    log.warning("Kalshi WS sample %s: %.400s", msg_type, raw)
             if msg_type == "orderbook_snapshot":
                 ticker = data.get("market_ticker")
                 if ticker:
