@@ -37,7 +37,9 @@ async def lifespan(app: FastAPI):
     # Build the engine from env settings overlaid with saved operator settings.
     effective = await settings_mgr.effective(settings)
     engine = TradingEngine(effective, store)
-    if effective.autostart:
+    # The AUTOSTART env var is authoritative: it forces a start even if the
+    # operator's saved settings default autostart to false.
+    if settings.autostart or effective.autostart:
         await engine.start()
     yield
     if engine:
