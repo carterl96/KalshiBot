@@ -213,14 +213,24 @@ class KalshiWS:
             if msg_type == "orderbook_snapshot":
                 ticker = data.get("market_ticker")
                 if ticker:
-                    self.book(ticker).apply_snapshot(
-                        data.get("yes", []), data.get("no", [])
-                    )
+                    # Current Kalshi format uses dollar-string prices in
+                    # *_dollars_fp; older format used integer-cent yes/no.
+                    if "yes_dollars_fp" in data or "no_dollars_fp" in data:
+                        yes = self._levels_dollars(data.get("yes_dollars_fp"))
+                        no = self._levels_dollars(data.get("no_dollars_fp"))
+                    else:
+                        yes = data.get("yes", [])
+                        no = data.get("no", [])
+                    self.book(ticker).apply_snapshot(yes, no)
                     self._emit(ticker)
             elif msg_type == "orderbook_delta":
                 ticker = data.get("market_ticker")
-                price = data.get("price")
-                delta = data.get("delta")
+                if "price_dollars" in data:
+                    price = self._dollars_to_cents(data.get("price_dollars"))
+                    delta = self._fp_to_int(data.get("delta_fp"))
+                else:
+                    price = data.get("price")
+                    delta = data.get("delta")
                 if ticker and price is not None and delta is not None:
                     self.book(ticker).apply_delta(data.get("side"), int(price), int(delta))
                     self._emit(ticker)
@@ -233,6 +243,35 @@ class KalshiWS:
                 log.info("Kalshi WS subscribed: %.200s", raw)
         except Exception as exc:  # noqa: BLE001
             log.debug("skipping malformed WS message (%s): %.200s", exc, raw)
+
+    @staticmethod
+    def _dollars_to_cents(value) -> Optional[int]:
+        """Kalshi sends prices as dollar strings ('0.2100' == 21 cents)."""
+        try:
+            return int(round(float(value) * 100))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _fp_to_int(value) -> Optional[int]:
+        """Fixed-point contract counts arrive as strings ('-20.00')."""
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    def _levels_dollars(self, raw) -> list[list[int]]:
+        """Convert [['0.2100','7028.00'], ...] to [[cents, count], ...]."""
+        out: list[list[int]] = []
+        for item in raw or []:
+            try:
+                cents = self._dollars_to_cents(item[0])
+                count = self._fp_to_int(item[1])
+            except (TypeError, IndexError):
+                continue
+            if cents is not None and count is not None:
+                out.append([cents, count])
+        return out
 
     def _emit(self, ticker: str) -> None:
         if self._on_update:
