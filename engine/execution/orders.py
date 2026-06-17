@@ -56,6 +56,7 @@ class ExecutionResult:
     mode: str
     reason: str = ""
     order_id: str = ""
+    pnl: float = 0.0
 
 
 @dataclass
@@ -147,7 +148,8 @@ class OrderManager:
             self.mode, quantity, ticker, side, price_prob, pnl, reason,
         )
         return ExecutionResult(
-            True, ticker, side, "sell", quantity, price_prob, self.mode, reason=reason
+            True, ticker, side, "sell", quantity, price_prob, self.mode,
+            reason=reason, pnl=pnl,
         )
 
     def settle(self, ticker: str, up_wins: bool) -> float:

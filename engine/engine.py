@@ -244,6 +244,7 @@ class TradingEngine:
             res = await self.orders.sell(pos.ticker, pos.side, pos.quantity, price,
                                          reason="kill switch flatten")
             if res.ok:
+                self.risk.record_realized(res.pnl)
                 await self._log_trade(res)
 
     # ---- feed callbacks ----
@@ -367,9 +368,12 @@ class TradingEngine:
         price = (bid / 100.0) if bid else pos.avg_price
         res = await self.orders.sell(pos.ticker, side, pos.quantity, price, reason=reason)
         if res.ok:
+            # Early closes realize P&L too — count it toward the daily total so
+            # the daily-loss-limit circuit breaker sees cut-loss exits.
+            self.risk.record_realized(res.pnl)
             await self._log_trade(res)
             log.info("[window] closed %s:%s reason=%s pnl≈%.2f",
-                     market.ticker, side, reason, res.quantity * (price - pos.avg_price))
+                     market.ticker, side, reason, res.pnl)
 
     async def _act_on_signal(self, market: MarketInfo, sig: Signal, label: str = "entry") -> None:
         equity = self.orders.equity(self._mark_prices())
