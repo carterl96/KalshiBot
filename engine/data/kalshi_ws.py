@@ -182,6 +182,8 @@ class KalshiWS:
             "params": {"channels": channels, "market_tickers": sorted(self.tickers)},
         }
         await ws.send(json.dumps(cmd))
+        log.info("Kalshi WS subscribe sent for %d tickers (channels=%s)",
+                 len(self.tickers), channels)
 
     async def resubscribe(self, tickers: list[str]) -> None:
         """Update the subscription set (used as markets roll over)."""
@@ -218,6 +220,10 @@ class KalshiWS:
             elif msg_type == "fill":
                 if self._on_fill:
                     self._on_fill(data)
+            elif msg_type == "error":
+                log.warning("Kalshi WS error message: %.300s", raw)
+            elif msg_type == "subscribed":
+                log.info("Kalshi WS subscribed: %.200s", raw)
         except Exception as exc:  # noqa: BLE001
             log.debug("skipping malformed WS message (%s): %.200s", exc, raw)
 

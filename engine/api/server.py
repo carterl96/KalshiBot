@@ -24,6 +24,13 @@ from engine.telemetry.store import Store
 
 log = logging.getLogger("api")
 
+# Ensure engine INFO logs surface in production (uvicorn launch skips main.py's
+# logging setup, otherwise INFO from feeds/markets would be invisible).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 settings = get_settings()
 store = Store(settings.database_url)
 settings_mgr = SettingsManager(store, settings.app_secret)
