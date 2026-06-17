@@ -221,6 +221,11 @@ class TradingEngine:
         self.orders.mode = mode
         if mode == "live":
             await self.orders.sync_live_balance()
+        # Re-baseline drawdown tracking to the new mode's balance so a large
+        # paper<->live balance change isn't misread as a drawdown and trips
+        # the circuit breaker.
+        self.risk.peak_equity = self.orders.equity(self._mark_prices())
+        self.risk.circuit_broken = False
         log.warning("Trading mode set to %s", mode)
         await self.broadcast_state()
 
@@ -233,6 +238,9 @@ class TradingEngine:
 
     def reset_risk(self) -> None:
         self.risk.reset()
+        # Re-baseline the drawdown peak to current equity so the breaker does
+        # not immediately re-trip on the next equity sample.
+        self.risk.peak_equity = self.orders.equity(self._mark_prices())
 
     async def _flatten_all(self) -> None:
         for key, pos in list(self.orders.positions.items()):

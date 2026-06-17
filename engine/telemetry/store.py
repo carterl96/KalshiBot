@@ -173,6 +173,13 @@ class Store:
 
     async def add_decision(self, **kw) -> dict:
         kw.setdefault("ts", time.time())
+        # Defensively fit the fixed-width string columns so an over-long value
+        # (e.g. a verbose reason) can never abort the eval loop on insert.
+        _caps = {"ticker": 64, "decision": 32, "action_taken": 32, "source": 16}
+        for field, cap in _caps.items():
+            val = kw.get(field)
+            if isinstance(val, str) and len(val) > cap:
+                kw[field] = val[:cap]
         async with self.session() as s:
             row = Decision(**kw)
             s.add(row)
