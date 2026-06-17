@@ -25,7 +25,7 @@ from engine.auth.signer import KalshiSigner
 
 log = logging.getLogger("feed.kalshi")
 
-WS_PATH = "/trade-api/v2/ws/v2"
+WS_PATH = "/trade-api/ws/v2"
 
 
 class OrderBook:
