@@ -148,6 +148,9 @@ class Proposal(Base):
 
 class Store:
     def __init__(self, database_url: str):
+        # Railway provides postgresql:// but asyncpg needs postgresql+asyncpg://
+        if database_url.startswith("postgresql://"):
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
         self.engine = create_async_engine(database_url, future=True)
         self.session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
