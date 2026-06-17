@@ -197,23 +197,29 @@ class KalshiWS:
             msg = json.loads(raw)
         except json.JSONDecodeError:
             return
-        msg_type = msg.get("type")
-        data = msg.get("msg", {})
-        if msg_type == "orderbook_snapshot":
-            ticker = data.get("market_ticker")
-            if ticker:
-                self.book(ticker).apply_snapshot(data.get("yes", []), data.get("no", []))
-                self._emit(ticker)
-        elif msg_type == "orderbook_delta":
-            ticker = data.get("market_ticker")
-            if ticker:
-                self.book(ticker).apply_delta(
-                    data.get("side"), int(data.get("price")), int(data.get("delta"))
-                )
-                self._emit(ticker)
-        elif msg_type == "fill":
-            if self._on_fill:
-                self._on_fill(data)
+        # A single malformed message must never tear down the connection.
+        try:
+            msg_type = msg.get("type")
+            data = msg.get("msg", {})
+            if msg_type == "orderbook_snapshot":
+                ticker = data.get("market_ticker")
+                if ticker:
+                    self.book(ticker).apply_snapshot(
+                        data.get("yes", []), data.get("no", [])
+                    )
+                    self._emit(ticker)
+            elif msg_type == "orderbook_delta":
+                ticker = data.get("market_ticker")
+                price = data.get("price")
+                delta = data.get("delta")
+                if ticker and price is not None and delta is not None:
+                    self.book(ticker).apply_delta(data.get("side"), int(price), int(delta))
+                    self._emit(ticker)
+            elif msg_type == "fill":
+                if self._on_fill:
+                    self._on_fill(data)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("skipping malformed WS message (%s): %.200s", exc, raw)
 
     def _emit(self, ticker: str) -> None:
         if self._on_update:
