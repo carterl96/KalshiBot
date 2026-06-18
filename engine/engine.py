@@ -342,14 +342,17 @@ class TradingEngine:
                         )
                     )
 
-            # --- Phase 2: near-close exits (check before new entries) ---
+            # --- Phase 2: exits — trailing take-profit / price stop / near-close ---
             for side, sig in sigs.items():
                 pos = self.orders.position(m.ticker, side)
                 if pos.quantity > 0:
-                    if self.window_mgr.should_take_profit(m.ticker, side, sig.model_prob, tau):
-                        await self._close_position(m, pos, side, book, "take_profit")
-                    elif self.window_mgr.should_cut_loss(m.ticker, side, sig.model_prob, tau):
-                        await self._close_position(m, pos, side, book, "cut_loss")
+                    bid_c = book.yes_bid_ask()[0] if side == "up" else book.no_bid_ask()[0]
+                    sell_price = (bid_c / 100.0) if bid_c else None
+                    reason = self.window_mgr.exit_signal(
+                        m.ticker, side, sell_price, pos.avg_price, sig.model_prob, tau
+                    )
+                    if reason:
+                        await self._close_position(m, pos, side, book, reason)
 
             # --- New entries / scale-ins / hedges ---
             for side, sig in sigs.items():

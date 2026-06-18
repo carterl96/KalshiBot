@@ -31,6 +31,7 @@ class WindowState:
     entries: int = 0          # total entries taken (both directions combined)
     hedged: bool = False      # have we opened the opposite-side hedge?
     closed: bool = False      # True once settled / flattened
+    peak_price: dict = field(default_factory=dict)  # side -> highest sell-price seen
 
 
 class WindowManager:
@@ -63,6 +64,9 @@ class WindowManager:
         profit_take_min_prob: float = 0.80,
         stop_loss_tau_s: float = 60.0,
         stop_loss_max_prob: float = 0.25,
+        trail_arm_gain: float = 0.15,
+        trail_distance: float = 0.08,
+        stop_loss_drop: float = 0.18,
     ):
         self.max_entries = max_entries
         self.hedge_trigger_prob = hedge_trigger_prob
@@ -70,6 +74,12 @@ class WindowManager:
         self.profit_take_min_prob = profit_take_min_prob
         self.stop_loss_tau_s = stop_loss_tau_s
         self.stop_loss_max_prob = stop_loss_max_prob
+        # Trailing take-profit: arm once the sell-price runs `trail_arm_gain`
+        # above entry, then exit if it retraces `trail_distance` from its peak.
+        self.trail_arm_gain = trail_arm_gain
+        self.trail_distance = trail_distance
+        # Price stop-loss: cut if the sell-price falls `stop_loss_drop` below entry.
+        self.stop_loss_drop = stop_loss_drop
         self._windows: dict[str, WindowState] = {}
 
     # ---- accessor ----
@@ -144,6 +154,47 @@ class WindowManager:
             tau_seconds <= self.stop_loss_tau_s
             and model_prob <= self.stop_loss_max_prob
         )
+
+    def exit_signal(
+        self,
+        ticker: str,
+        side: str,
+        sell_price: Optional[float],
+        entry_price: float,
+        model_prob: float,
+        tau_seconds: float,
+    ) -> Optional[str]:
+        """Decide whether to close a held position *now*, at any point in the
+        window — not just near close.
+
+        Priority:
+          1. ``trailing_take_profit`` — armed once the bid has run far enough
+             above entry; fires when it retraces ``trail_distance`` from peak.
+          2. ``stop_loss`` — bid has fallen ``stop_loss_drop`` below entry.
+          3. ``take_profit`` / ``cut_loss`` — original near-close model exits.
+        Returns the reason string, or ``None`` to keep holding.
+        """
+        w = self.get(ticker)
+        if w.closed or w.direction != side or w.entries == 0:
+            return None
+
+        if sell_price is not None:
+            peak = max(w.peak_price.get(side, 0.0), sell_price)
+            w.peak_price[side] = peak
+            # Trailing take-profit (only after a real run-up above entry).
+            armed = peak >= entry_price + self.trail_arm_gain
+            if armed and sell_price <= peak - self.trail_distance:
+                return "trailing_take_profit"
+            # Hard price stop-loss.
+            if sell_price <= entry_price - self.stop_loss_drop:
+                return "stop_loss"
+
+        # Backstop: original near-close, model-confidence exits.
+        if self.should_take_profit(ticker, side, model_prob, tau_seconds):
+            return "take_profit"
+        if self.should_cut_loss(ticker, side, model_prob, tau_seconds):
+            return "cut_loss"
+        return None
 
     # ---- record actions ----
 

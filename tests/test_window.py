@@ -17,6 +17,38 @@ def make_mgr(**kw):
     return WindowManager(**defaults)
 
 
+# ---- trailing take-profit / price stop-loss ----
+
+def _open(m, ticker="KXBTC-1", side="up"):
+    m.record_entry(ticker, side)
+    return ticker, side
+
+
+def test_trailing_take_profit_fires_on_retrace():
+    m = make_mgr(trail_arm_gain=0.15, trail_distance=0.08)
+    t, s = _open(m)
+    # Entry 0.37; price climbs to 0.95 (armed), then retraces past the trail.
+    assert m.exit_signal(t, s, 0.60, 0.37, 0.9, 600) is None   # armed, no retrace yet
+    assert m.exit_signal(t, s, 0.95, 0.37, 0.95, 600) is None  # new peak
+    # Retrace 0.95 -> 0.86 (>= 0.08 drop) triggers trailing exit, mid-window.
+    assert m.exit_signal(t, s, 0.86, 0.37, 0.9, 600) == "trailing_take_profit"
+
+
+def test_trailing_not_armed_without_runup():
+    m = make_mgr(trail_arm_gain=0.15, trail_distance=0.08)
+    t, s = _open(m)
+    # Small wiggle near entry never arms the trail.
+    assert m.exit_signal(t, s, 0.40, 0.37, 0.5, 600) is None
+    assert m.exit_signal(t, s, 0.34, 0.37, 0.5, 600) is None
+
+
+def test_price_stop_loss_fires():
+    m = make_mgr(stop_loss_drop=0.18)
+    t, s = _open(m)
+    # Entry 0.37, bid falls to 0.18 (0.19 drop) -> stop, well before close.
+    assert m.exit_signal(t, s, 0.18, 0.37, 0.2, 600) == "stop_loss"
+
+
 # ---- entry / scale-in ----
 
 def test_fresh_ticker_can_entry():
