@@ -184,6 +184,7 @@ class TradingEngine:
         self._tasks = [
             asyncio.create_task(self._eval_loop(), name="eval"),
             asyncio.create_task(self._market_refresh_loop(), name="refresh"),
+            asyncio.create_task(self._orderbook_refresh_loop(), name="orderbook"),
             asyncio.create_task(self._equity_loop(), name="equity"),
             asyncio.create_task(self._settlement_loop(), name="settle"),
             asyncio.create_task(self._llm_loop(), name="llm"),
@@ -496,6 +497,29 @@ class TradingEngine:
         tickers = await self.markets.refresh()
         if tickers:
             await self.kalshi_ws.resubscribe(tickers)
+
+    async def _orderbook_refresh_loop(self) -> None:
+        """Poll the REST order book for active markets as ground truth.
+
+        The incremental WS stream can silently desync (missed deltas leave a
+        stale/crossed book), which is catastrophic for pricing and stop-losses.
+        A frequent full REST snapshot guarantees the book can't rot for long.
+        Only a handful of crypto windows are open at once, so this stays well
+        within rate limits.
+        """
+        while self.running:
+            try:
+                if self.rest:
+                    for m in self.markets.active():
+                        try:
+                            resp = await self.rest.get_orderbook(m.ticker)
+                            ob = resp.get("orderbook_fp") or resp.get("orderbook") or {}
+                            self.kalshi_ws.apply_rest_orderbook(m.ticker, ob)
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("orderbook refresh failed for %s: %s", m.ticker, exc)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("orderbook refresh loop error: %s", exc)
+            await asyncio.sleep(1.0)
 
     async def _equity_loop(self) -> None:
         was_broken = False

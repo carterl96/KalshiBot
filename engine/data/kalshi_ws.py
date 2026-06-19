@@ -56,20 +56,32 @@ class OrderBook:
     def best_no_bid(self) -> Optional[int]:
         return max(self.no) if self.no else None
 
+    def crossed(self) -> bool:
+        """A healthy book never has best_yes_bid + best_no_bid > 100 (those
+        orders would have matched). If it does, the book is stale/corrupt."""
+        yb = self.best_yes_bid()
+        nb = self.best_no_bid()
+        return yb is not None and nb is not None and (yb + nb) > 100
+
     def yes_bid_ask(self) -> tuple[Optional[int], Optional[int]]:
-        """Best YES bid and YES ask (in cents).
+        """Best YES bid and YES ask (in cents). Returns (None, None) if the book
+        is crossed/corrupt so callers never trade or mark off bad prices.
 
         A NO bid at price p implies a YES ask at (100 - p): selling NO at p is
         buying YES at 100 - p.
         """
+        if self.crossed():
+            return None, None
         yes_bid = self.best_yes_bid()
         no_bid = self.best_no_bid()
         yes_ask = (100 - no_bid) if no_bid is not None else None
         return yes_bid, yes_ask
 
     def no_bid_ask(self) -> tuple[Optional[int], Optional[int]]:
-        """Best NO bid and NO ask (in cents). A YES bid at p implies a NO ask
-        at (100 - p)."""
+        """Best NO bid and NO ask (in cents). (None, None) if crossed/corrupt.
+        A YES bid at p implies a NO ask at (100 - p)."""
+        if self.crossed():
+            return None, None
         no_bid = self.best_no_bid()
         yes_bid = self.best_yes_bid()
         no_ask = (100 - yes_bid) if yes_bid is not None else None
@@ -272,6 +284,23 @@ class KalshiWS:
             if cents is not None and count is not None:
                 out.append([cents, count])
         return out
+
+    def apply_rest_orderbook(self, ticker: str, ob: dict) -> None:
+        """Replace a ticker's book from a REST orderbook response (ground truth).
+
+        Handles both the fixed-point dollar shape (``yes_dollars``/``no_dollars``
+        of ``[["0.1500","100.00"], ...]``) and the legacy integer-cent shape
+        (``yes``/``no`` of ``[[price_cents, count], ...]``)."""
+        if not ob:
+            return
+        if ob.get("yes_dollars") is not None or ob.get("no_dollars") is not None:
+            yes = self._levels_dollars(ob.get("yes_dollars"))
+            no = self._levels_dollars(ob.get("no_dollars"))
+        else:
+            yes = [[int(r[0]), int(r[1])] for r in (ob.get("yes") or []) if len(r) >= 2]
+            no = [[int(r[0]), int(r[1])] for r in (ob.get("no") or []) if len(r) >= 2]
+        self.book(ticker).apply_snapshot(yes, no)
+        self._emit(ticker)
 
     def _emit(self, ticker: str) -> None:
         if self._on_update:
