@@ -32,7 +32,7 @@ from engine.execution.orders import OrderManager
 from engine.execution.window import WindowManager
 from engine.llm.meta import LLMMetaLayer, MetaGuidance
 from engine.markets import MarketInfo, MarketManager
-from engine.pricing.model import VolEstimator
+from engine.pricing.model import VolEstimator, prob_above
 from engine.risk.limits import RiskEngine, RiskParams
 from engine.strategy.edge import Signal, evaluate
 from engine.data.brrny import BRRNYFeed
@@ -291,10 +291,17 @@ class TradingEngine:
             product = product_for_series(m.series)
             spot = self.spot.get(product)
             sigma = self.vol[product].sigma_annual() if product in self.vol else 0.0
-            if not spot or sigma <= 0:
-                continue
             book = self.kalshi_ws.book(m.ticker)
             tau = m.tau_seconds(now)
+
+            # --- EXITS: run on EVERY open position, every cycle, independent of
+            #     whether a fresh entry signal exists. Price-based exits (trailing
+            #     take-profit / stop-loss) work even before vol warms up. ---
+            await self._handle_exits(m, book, spot, sigma, tau)
+
+            # Entries require a usable fair-value model; wait for vol warmup.
+            if not spot or sigma <= 0:
+                continue
 
             # Adjust min_edge per active strategy from the LLM.
             strategy = self.guidance.active_strategy
@@ -342,18 +349,6 @@ class TradingEngine:
                         )
                     )
 
-            # --- Phase 2: exits — trailing take-profit / price stop / near-close ---
-            for side, sig in sigs.items():
-                pos = self.orders.position(m.ticker, side)
-                if pos.quantity > 0:
-                    bid_c = book.yes_bid_ask()[0] if side == "up" else book.no_bid_ask()[0]
-                    sell_price = (bid_c / 100.0) if bid_c else None
-                    reason = self.window_mgr.exit_signal(
-                        m.ticker, side, sell_price, pos.avg_price, sig.model_prob, tau
-                    )
-                    if reason:
-                        await self._close_position(m, pos, side, book, reason)
-
             # --- New entries / scale-ins / hedges ---
             for side, sig in sigs.items():
                 if not sig.tradeable:
@@ -379,6 +374,32 @@ class TradingEngine:
 
         # Periodic cleanup of stale window states.
         self.window_mgr.cleanup_old()
+
+    async def _handle_exits(
+        self, market: MarketInfo, book, spot, sigma, tau: float
+    ) -> None:
+        """Evaluate trailing take-profit / price stop-loss / near-close exits for
+        every open position in this market, regardless of entry-signal state."""
+        # Model probability of "up", if we have enough to compute it. Price-based
+        # exits don't need it; near-close model exits do.
+        p_up = None
+        if spot and sigma > 0 and tau > 0:
+            p_up = prob_above(spot, market.strike, sigma, tau)
+        for side in ("up", "down"):
+            pos = self.orders.position(market.ticker, side)
+            if pos.quantity <= 0:
+                continue
+            bid_c = book.yes_bid_ask()[0] if side == "up" else book.no_bid_ask()[0]
+            sell_price = (bid_c / 100.0) if bid_c else None
+            if p_up is not None:
+                model_prob = p_up if side == "up" else (1.0 - p_up)
+            else:
+                model_prob = 0.5  # neutral; price-based exits still apply
+            reason = self.window_mgr.exit_signal(
+                market.ticker, side, sell_price, pos.avg_price, model_prob, tau
+            )
+            if reason:
+                await self._close_position(market, pos, side, book, reason)
 
     async def _close_position(
         self, market: MarketInfo, pos, side: str, book, reason: str
