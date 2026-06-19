@@ -62,6 +62,60 @@ async def test_reconcile_live_positions_maps_kalshi_book():
     assert "MKT-C:up" not in om.positions and "MKT-C:down" not in om.positions
 
 
+class _CaptureRest:
+    """Captures the order payload sent to Kalshi for assertion."""
+
+    def __init__(self):
+        self.orders = []
+        self.signer = object()
+
+    async def place_order(self, order):
+        self.orders.append(order)
+        return {"order_id": "abc", "fill_count": "0.00"}
+
+
+@pytest.mark.asyncio
+async def test_live_order_payload_buy_up_is_bid_yes():
+    rest = _CaptureRest()
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    res = await om.buy("MKT", "up", 10, 0.40)
+    assert res.ok
+    o = rest.orders[-1]
+    assert o["ticker"] == "MKT" and o["side"] == "bid"
+    assert o["count"] == "10.00" and o["price"] == "0.4000"
+    assert o["time_in_force"] == "fill_or_kill"
+    assert "self_trade_prevention_type" in o
+
+
+@pytest.mark.asyncio
+async def test_live_order_payload_buy_down_is_ask_at_complement():
+    rest = _CaptureRest()
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    await om.buy("MKT", "down", 10, 0.04)  # buy NO @0.04 == sell YES @0.96
+    o = rest.orders[-1]
+    assert o["side"] == "ask" and o["price"] == "0.9600"
+
+
+@pytest.mark.asyncio
+async def test_live_order_payload_sell_up_is_ask_yes():
+    rest = _CaptureRest()
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    om.position("MKT", "up").add(10, 0.40)
+    await om.sell("MKT", "up", 10, 0.55)
+    o = rest.orders[-1]
+    assert o["side"] == "ask" and o["price"] == "0.5500"
+
+
+@pytest.mark.asyncio
+async def test_live_order_payload_sell_down_is_bid_at_complement():
+    rest = _CaptureRest()
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    om.position("MKT", "down").add(10, 0.30)
+    await om.sell("MKT", "down", 10, 0.30)  # sell NO @0.30 == buy YES @0.70
+    o = rest.orders[-1]
+    assert o["side"] == "bid" and o["price"] == "0.7000"
+
+
 @pytest.mark.asyncio
 async def test_reset_positions_clears_book():
     om = OrderManager(rest=None, mode="paper", balance=100.0)

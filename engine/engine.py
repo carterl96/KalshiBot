@@ -442,6 +442,10 @@ class TradingEngine:
                     self.window_mgr.record_hedge(market.ticker)
                 else:
                     self.window_mgr.record_entry(market.ticker, sig.side)
+            else:
+                # Surface real rejection (e.g. a broker API error) instead of
+                # silently labelling it "no size".
+                action_taken = f"rejected:{res.reason}"
 
         await self.store.add_decision(
             ticker=market.ticker,

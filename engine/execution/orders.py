@@ -178,22 +178,31 @@ class OrderManager:
                 False, ticker, side, action, 0, price_prob, self.mode,
                 reason="no REST client for live order",
             )
-        # Map our direction to Kalshi's yes/no contract + price field.
-        kalshi_side = "yes" if side == "up" else "no"
-        price_cents = max(1, min(99, round(price_prob * 100)))
+        # Kalshi V2 event-order API is YES-denominated: side "bid" = buy YES,
+        # "ask" = sell YES, with one `price` (the YES price) in dollar fixed-point.
+        #   buy  up   -> bid @ yes_price = price_prob       (buy YES)
+        #   sell up   -> ask @ yes_price = price_prob       (sell YES)
+        #   buy  down -> ask @ yes_price = 1 - price_prob   (sell YES == buy NO)
+        #   sell down -> bid @ yes_price = 1 - price_prob   (buy YES == sell NO)
+        if side == "up":
+            api_side = "bid" if action == "buy" else "ask"
+            yes_price = price_prob
+        else:
+            api_side = "ask" if action == "buy" else "bid"
+            yes_price = 1.0 - price_prob
+        yes_price = min(max(yes_price, 0.01), 0.99)
         order = {
             "ticker": ticker,
-            "action": action,
-            "side": kalshi_side,
-            "count": quantity,
-            "type": "limit",
+            "side": api_side,
+            "count": f"{quantity:.2f}",
+            "price": f"{yes_price:.4f}",
             "time_in_force": "fill_or_kill",
+            "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": str(uuid.uuid4()),
-            ("yes_price" if kalshi_side == "yes" else "no_price"): price_cents,
         }
         try:
             resp = await self.rest.place_order(order)
-            oid = resp.get("order", {}).get("order_id", "")
+            oid = resp.get("order_id") or resp.get("order", {}).get("order_id", "")
             return ExecutionResult(
                 True, ticker, side, action, quantity, price_prob, self.mode,
                 order_id=oid,

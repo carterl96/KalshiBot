@@ -146,11 +146,14 @@ class KalshiRestClient:
         )
 
     async def place_order(self, order: dict) -> dict:
-        """Place an order. `order` follows Kalshi's CreateOrder schema, e.g.
-        {ticker, action:"buy"|"sell", side:"yes"|"no", count, type:"limit",
-         yes_price | no_price, client_order_id, time_in_force}."""
+        """Place a single order via Kalshi's V2 event-order endpoint.
+
+        The legacy POST /portfolio/orders was retired (HTTP 410) in June 2026.
+        V2 uses a YES-denominated single-book shape: {ticker, side:"bid"|"ask",
+        count:"50.00", price:"0.0400", time_in_force, self_trade_prevention_type,
+        client_order_id}."""
         return await self._request(
-            "POST", "/portfolio/orders", auth=True, json=order
+            "POST", "/portfolio/events/orders", auth=True, json=order
         )
 
     async def cancel_order(self, order_id: str) -> dict:
