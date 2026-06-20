@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="")
     gemini_api_key: str = Field(default="")
     llm_enabled: bool = Field(default=False)
+    # Cost controls: cheap models for the routine 30s supervisor call, a larger
+    # (configurable) model for the periodic deep param-review, and a hard daily
+    # token budget the layer self-limits to. Claude is primary; Gemini is the
+    # failover when Claude errors or the budget is exhausted on one provider.
+    llm_model_claude: str = Field(default="claude-haiku-4-5-20251001")
+    llm_model_claude_review: str = Field(default="claude-haiku-4-5-20251001")
+    llm_model_gemini: str = Field(default="gemini-2.5-flash")
+    llm_daily_token_budget: int = Field(default=1_000_000)  # 0 = unlimited
 
     # --- Alerts (optional) ---
     # Discord/Slack-compatible incoming webhook URL.

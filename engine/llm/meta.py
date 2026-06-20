@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
@@ -34,8 +35,51 @@ GEMINI_URL = (
     "{model}:generateContent"
 )
 
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+# Cheap, fast models for the routine supervisor call. Override via settings;
+# point the review model at a larger model if you want deeper periodic reviews.
+DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+class TokenBudget:
+    """Tracks LLM token usage against a hard daily cap (resets each UTC day).
+
+    The meta-layer checks ``over`` before every call and stops spending once the
+    budget is exhausted, so a runaway loop can't burn through the account.
+    """
+
+    def __init__(self, daily_limit: int):
+        self.daily_limit = max(0, int(daily_limit))
+        self._day = None
+        self.used = 0
+
+    def _roll(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        if today != self._day:
+            self._day = today
+            self.used = 0
+
+    def add(self, tokens: int) -> None:
+        self._roll()
+        self.used += max(0, int(tokens or 0))
+
+    @property
+    def over(self) -> bool:
+        self._roll()
+        return self.daily_limit > 0 and self.used >= self.daily_limit
+
+    def remaining(self) -> int:
+        self._roll()
+        return -1 if self.daily_limit == 0 else max(0, self.daily_limit - self.used)
+
+    def snapshot(self) -> dict:
+        self._roll()
+        return {
+            "used": self.used,
+            "daily_limit": self.daily_limit,
+            "remaining": self.remaining(),
+            "over_budget": self.over,
+        }
 
 SYSTEM_PROMPT = (
     "You are the risk/strategy supervisor for an automated Kalshi crypto "
@@ -123,53 +167,32 @@ class LLMMetaLayer:
         gemini_key: str = "",
         claude_model: str = DEFAULT_CLAUDE_MODEL,
         gemini_model: str = DEFAULT_GEMINI_MODEL,
+        claude_review_model: str = "",
+        daily_token_budget: int = 1_000_000,
     ):
         self.anthropic_key = anthropic_key
         self.gemini_key = gemini_key
         self.claude_model = claude_model
         self.gemini_model = gemini_model
+        # Larger model for the periodic deep param-review; falls back to routine.
+        self.claude_review_model = claude_review_model or claude_model
+        self.budget = TokenBudget(daily_token_budget)
         self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
     def enabled(self) -> bool:
         return bool(self.anthropic_key or self.gemini_key)
 
+    def usage_snapshot(self) -> dict:
+        return self.budget.snapshot()
+
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def advise(self, context: dict) -> MetaGuidance:
-        """Get guidance, preferring an ensemble of available models.
+    # ---- generic provider calls (record token usage) ----
 
-        Claude acts as primary; Gemini as a critic. We blend their risk dials
-        (min, to stay conservative) and take the primary's regime/strategy.
-        """
-        if not self.enabled:
-            return MetaGuidance()
-
-        prompt = json.dumps(context, default=str)[:6000]
-        results: list[MetaGuidance] = []
-
-        if self.anthropic_key:
-            g = await self._ask_claude(prompt)
-            if g:
-                results.append(g)
-        if self.gemini_key:
-            g = await self._ask_gemini(prompt)
-            if g:
-                results.append(g)
-
-        if not results:
-            return MetaGuidance(note="LLM call failed; using defaults")
-        if len(results) == 1:
-            return results[0]
-        # Ensemble: conservative dial, primary (Claude/first) regime + strategy.
-        primary = results[0]
-        primary.risk_dial = min(r.risk_dial for r in results)
-        primary.source = "+".join(r.source for r in results)
-        primary.note = " | ".join(f"{r.source}: {r.note}" for r in results)
-        return primary
-
-    async def _ask_claude(self, prompt: str) -> MetaGuidance | None:
+    async def _call_claude(self, system: str, prompt: str, model: str,
+                           max_tokens: int) -> str | None:
         try:
             resp = await self._client.post(
                 ANTHROPIC_URL,
@@ -179,112 +202,100 @@ class LLMMetaLayer:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": self.claude_model,
-                    "max_tokens": 256,
-                    "system": SYSTEM_PROMPT,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": system,
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            text = "".join(
-                block.get("text", "") for block in data.get("content", [])
-            )
-            return _parse_guidance(text, "claude")
+            usage = data.get("usage", {}) or {}
+            self.budget.add(usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+            return "".join(b.get("text", "") for b in data.get("content", []))
         except Exception as exc:  # noqa: BLE001
-            log.warning("Claude advise failed: %s", exc)
+            log.warning("Claude call failed: %s", exc)
             return None
 
-    async def propose_params(self, calibration_summary: dict, recent_losses: list[dict]) -> dict | None:
-        """Ask the LLM to review calibration data and propose parameter tweaks.
+    async def _call_gemini(self, system: str, prompt: str,
+                          max_tokens: int) -> str | None:
+        try:
+            url = GEMINI_URL.format(model=self.gemini_model)
+            resp = await self._client.post(
+                url,
+                params={"key": self.gemini_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": system}]},
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": max_tokens},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            meta = data.get("usageMetadata", {}) or {}
+            self.budget.add(meta.get("totalTokenCount", 0))
+            return (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Gemini call failed: %s", exc)
+            return None
 
-        Returns a dict with ``description`` and ``params`` (partial dict of
-        parameter overrides), or None if the call failed or LLM is disabled.
+    # ---- public API ----
+
+    async def advise(self, context: dict) -> MetaGuidance:
+        """Routine supervisor call with provider failover.
+
+        Claude (cheap routine model) is primary; if it errors we fail over to
+        Gemini. We do NOT call both every cycle — that doubled cost for little
+        gain. Calls stop once the daily token budget is exhausted.
         """
         if not self.enabled:
+            return MetaGuidance()
+        if self.budget.over:
+            return MetaGuidance(note="LLM paused: daily token budget reached",
+                                source="budget")
+
+        prompt = json.dumps(context, default=str)[:6000]
+        if self.anthropic_key:
+            text = await self._call_claude(
+                SYSTEM_PROMPT, prompt, self.claude_model, 256
+            )
+            g = _parse_guidance(text, "claude") if text else None
+            if g:
+                return g
+        if self.gemini_key:
+            text = await self._call_gemini(SYSTEM_PROMPT, prompt, 256)
+            g = _parse_guidance(text, "gemini") if text else None
+            if g:
+                return g
+        return MetaGuidance(note="LLM call failed; using defaults")
+
+    async def propose_params(
+        self, calibration_summary: dict, recent_losses: list[dict]
+    ) -> dict | None:
+        """Periodic deep review: propose parameter tweaks from calibration data.
+
+        Uses the (optionally larger) review model, with Gemini failover. Returns
+        a dict with ``description`` and ``params``, or None.
+        """
+        if not self.enabled or self.budget.over:
             return None
         prompt = json.dumps(
             {"calibration": calibration_summary, "recent_losses": recent_losses},
             default=str,
         )[:6000]
         if self.anthropic_key:
-            return await self._ask_claude_proposal(prompt)
+            text = await self._call_claude(
+                PROPOSAL_SYSTEM, prompt, self.claude_review_model, 512
+            )
+            p = _parse_proposal(text) if text else None
+            if p:
+                return p
         if self.gemini_key:
-            return await self._ask_gemini_proposal(prompt)
+            text = await self._call_gemini(PROPOSAL_SYSTEM, prompt, 512)
+            return _parse_proposal(text) if text else None
         return None
-
-    async def _ask_claude_proposal(self, prompt: str) -> dict | None:
-        try:
-            resp = await self._client.post(
-                ANTHROPIC_URL,
-                headers={
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": self.claude_model,
-                    "max_tokens": 512,
-                    "system": PROPOSAL_SYSTEM,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = "".join(
-                block.get("text", "") for block in data.get("content", [])
-            )
-            return _parse_proposal(text)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Claude proposal failed: %s", exc)
-            return None
-
-    async def _ask_gemini_proposal(self, prompt: str) -> dict | None:
-        try:
-            url = GEMINI_URL.format(model=self.gemini_model)
-            resp = await self._client.post(
-                url,
-                params={"key": self.gemini_key},
-                json={
-                    "systemInstruction": {"parts": [{"text": PROPOSAL_SYSTEM}]},
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 512},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-            )
-            return _parse_proposal(text)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Gemini proposal failed: %s", exc)
-            return None
-
-    async def _ask_gemini(self, prompt: str) -> MetaGuidance | None:
-        try:
-            url = GEMINI_URL.format(model=self.gemini_model)
-            resp = await self._client.post(
-                url,
-                params={"key": self.gemini_key},
-                json={
-                    "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 256},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-            )
-            return _parse_guidance(text, "gemini")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Gemini advise failed: %s", exc)
-            return None

@@ -35,17 +35,22 @@ doesn't panic on noise.
 
 ## Phase 2B — AI layer (cost-controlled, resilient, adaptive)
 
-4. **Fixed-cadence LLM** calls (per window close / every N minutes), tight
-   context, cheap models (Gemini Flash / Claude Haiku routine; bigger model for
-   periodic deep reviews), **hard daily token budget** the bot self-limits to.
-5. **Provider failover**: Claude ↔ Gemini; if one is out of tokens/errors, the
-   other carries the analysis. Verify Gemini is actually wired and firing.
-6. **Regime detection + param proposals**; pause / de-risk when calibration
-   degrades ("strategy stopped working" = regime shift).
+4. **Fixed-cadence LLM** calls — DONE: routine 30s call uses cheap models
+   (Claude Haiku / Gemini Flash defaults), deep param-review uses a configurable
+   (optionally larger) review model, and a **hard daily token budget**
+   (`TokenBudget`, resets UTC-daily) the layer self-limits to. Usage surfaced in
+   the health snapshot (`llm_usage`).
+5. **Provider failover** — DONE: Claude is primary; on error/empty it fails over
+   to Gemini (no more always-calling-both, which doubled cost). Token usage is
+   parsed from both providers' responses.
+   - TODO: confirm it's firing live once keys are configured (watch `llm_usage`).
+6. **Regime detection + param proposals** — partial (advise returns a regime;
+   proposals run on a cadence). TODO: deterministic de-risk/pause when
+   calibration degrades ("strategy stopped working" = regime shift).
 7. **Strategy memory**: Postgres performance table (per strategy/regime: win
    rate, EV net of fees, Brier, sample size) + a **"Strategies" tab** showing
    what's actually worked. AI reads a compact summary; proposals surface for
-   one-click apply (no blind live RL).
+   one-click apply (no blind live RL). — TODO
 
 ## Phase 2C — Money-accuracy (gate before going live again)
 

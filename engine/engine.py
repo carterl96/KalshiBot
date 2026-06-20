@@ -140,6 +140,10 @@ class TradingEngine:
         self.llm = LLMMetaLayer(
             anthropic_key=settings.anthropic_api_key,
             gemini_key=settings.gemini_api_key,
+            claude_model=settings.llm_model_claude,
+            gemini_model=settings.llm_model_gemini,
+            claude_review_model=settings.llm_model_claude_review,
+            daily_token_budget=settings.llm_daily_token_budget,
         )
         self.alerts = AlertManager(webhook_url=settings.alert_webhook_url)
 
@@ -748,6 +752,7 @@ class TradingEngine:
             "uptime_s": round(time.time() - self.started_at, 1),
             "latency_ms": round(self.last_latency_ms, 2),
             "llm_enabled": self.llm.enabled,
+            "llm_usage": self.llm.usage_snapshot(),
             "has_credentials": self.signer is not None,
             "kalshi_env": self.settings.kalshi_env,
         }
