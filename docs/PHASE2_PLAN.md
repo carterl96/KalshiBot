@@ -49,11 +49,14 @@ doesn't panic on noise.
 
 ## Phase 2C — Money-accuracy (gate before going live again)
 
-8. **Balance reconciliation** from Kalshi `get_balance` as ground truth (kills
-   the $116-vs-$96 drift).
-9. **Real fill confirmation** — read `fill_count`/`remaining_count` + fees
-   instead of assuming fills.
-10. **Order throttle** — stop the 2×/sec retry spam on failed (409) orders.
+8. **Balance reconciliation** from Kalshi `get_balance` as ground truth — DONE
+   (re-sync after every live fill + every ~30s; kills the $116-vs-$96 drift).
+9. **Real fill confirmation** — DONE: parse fill_count + fees from the order
+   response; credit only what filled (no phantom positions on a killed FOK).
+   NOTE: response field names are defensive guesses — verify against a real
+   live order response before trusting in production.
+10. **Order throttle** — DONE: per-(ticker,side) cooldown after a rejected
+    order so the 0.5s eval loop stops re-sending the same failing order.
 
 ## Phase 2D — UX, notifications, SaaS groundwork
 

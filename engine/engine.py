@@ -72,6 +72,13 @@ class TradingEngine:
         self.signals: dict[str, Signal] = {}
         self.guidance = MetaGuidance()
 
+        # Per-(ticker:side) cooldown after a rejected order, so the 0.5s eval
+        # loop doesn't hammer the broker with the same failing order every tick.
+        self._order_cooldown: dict[str, float] = {}
+        self._order_cooldown_s = 8.0
+        # Live cash reconciliation cadence (seconds) — Kalshi is ground truth.
+        self._last_balance_sync = 0.0
+
         # Phase 2: window state machine + calibration tracker.
         self.window_mgr = self._new_window_manager()
         self.calibration = CalibrationTracker()
@@ -430,6 +437,10 @@ class TradingEngine:
                      market.ticker, side, reason, res.pnl)
 
     async def _act_on_signal(self, market: MarketInfo, sig: Signal, label: str = "entry") -> None:
+        # Throttle: skip if this market/side is in a post-rejection cooldown.
+        cd_key = f"{market.ticker}:{sig.side}"
+        if time.time() < self._order_cooldown.get(cd_key, 0.0):
+            return
         equity = self.orders.equity(self._mark_prices())
         self.risk.record_equity(equity)
         check = self.risk.check(
@@ -459,8 +470,10 @@ class TradingEngine:
                     )
             else:
                 # Surface real rejection (e.g. a broker API error) instead of
-                # silently labelling it "no size".
+                # silently labelling it "no size", and back off so we don't
+                # re-send the same failing order every 0.5s eval tick.
                 action_taken = f"rejected:{res.reason}"
+                self._order_cooldown[cd_key] = time.time() + self._order_cooldown_s
 
         await self.store.add_decision(
             ticker=market.ticker,
@@ -538,6 +551,11 @@ class TradingEngine:
     async def _equity_loop(self) -> None:
         was_broken = False
         while self.running:
+            # Reconcile live cash against Kalshi (ground truth) every ~30s so the
+            # local balance can't drift from the real account between fills.
+            if self.mode == "live" and time.time() - self._last_balance_sync > 30.0:
+                await self.orders.sync_live_balance()
+                self._last_balance_sync = time.time()
             equity = self.orders.equity(self._mark_prices())
             self.risk.record_equity(equity)
             # Alert if the circuit breaker just tripped this cycle.

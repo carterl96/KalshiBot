@@ -71,7 +71,12 @@ class _CaptureRest:
 
     async def place_order(self, order):
         self.orders.append(order)
-        return {"order_id": "abc", "fill_count": "0.00"}
+        # Echo a full fill so the payload-shape tests still succeed.
+        return {"order_id": "abc", "order": {"status": "executed",
+                                             "fill_count": order["count"]}}
+
+    async def get_balance(self):
+        return {"balance": 10000}
 
 
 @pytest.mark.asyncio
@@ -114,6 +119,60 @@ async def test_live_order_payload_sell_down_is_bid_at_complement():
     await om.sell("MKT", "down", 10, 0.30)  # sell NO @0.30 == buy YES @0.70
     o = rest.orders[-1]
     assert o["side"] == "bid" and o["price"] == "0.7000"
+
+
+class _FillRest:
+    """Stub returning a controlled order response + balance for fill tests."""
+
+    def __init__(self, resp, balance_cents=10000):
+        self._resp = resp
+        self._balance_cents = balance_cents
+        self.signer = object()
+
+    async def place_order(self, order):
+        return self._resp
+
+    async def get_balance(self):
+        return {"balance": self._balance_cents}
+
+
+@pytest.mark.asyncio
+async def test_live_fok_no_fill_leaves_no_position():
+    # A killed fill_or_kill must not create a phantom position.
+    rest = _FillRest({"order": {"status": "canceled", "fill_count": 0}})
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    res = await om.buy("MKT", "up", 10, 0.40)
+    assert not res.ok and res.quantity == 0
+    assert "no fill" in res.reason
+    assert om.position("MKT", "up").quantity == 0
+
+
+@pytest.mark.asyncio
+async def test_live_partial_fill_credits_only_filled():
+    rest = _FillRest({"order": {"status": "executed", "fill_count": 6}})
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    res = await om.buy("MKT", "up", 10, 0.40)
+    assert res.ok and res.quantity == 6
+    assert om.position("MKT", "up").quantity == 6
+
+
+@pytest.mark.asyncio
+async def test_live_fill_parses_fees():
+    rest = _FillRest(
+        {"order": {"status": "executed", "fill_count": 10, "taker_fees": 35}}
+    )
+    om = OrderManager(rest=rest, mode="live", balance=100.0)
+    res = await om.buy("MKT", "up", 10, 0.40)
+    assert res.ok and res.fees == pytest.approx(0.35)
+
+
+def test_parse_fill_assumes_requested_when_unknown():
+    # No recognizable fill field and no terminal status -> assume FOK filled.
+    from engine.execution.orders import _parse_fill
+    filled, fees = _parse_fill({"order_id": "x"}, requested=10)
+    assert filled == 10 and fees == 0.0
+    # Explicit cancel -> zero.
+    assert _parse_fill({"status": "canceled"}, requested=10) == (0, 0.0)
 
 
 @pytest.mark.asyncio
