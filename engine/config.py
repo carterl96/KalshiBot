@@ -49,11 +49,14 @@ class Settings(BaseSettings):
     series: str = Field(default="KXBTC15M,KXBTCD")
 
     # --- Risk defaults (overridable at runtime via admin panel) ---
-    starting_balance: float = Field(default=1000.0)  # USD, paper bankroll
-    max_per_trade: float = Field(default=20.0)        # USD notional per order
-    max_per_window: float = Field(default=60.0)       # USD across a single market window
-    daily_loss_limit: float = Field(default=50.0)     # USD; halts trading when hit
-    max_exposure: float = Field(default=200.0)        # USD total open exposure
+    # SAFE-BY-DEFAULT for live testing: tiny caps so the worst case is a few
+    # dollars while the AI validates the edge on real fills. Scale these up from
+    # the Controls page once realized EV is proven positive.
+    starting_balance: float = Field(default=1000.0)  # USD, paper bankroll (unused live)
+    max_per_trade: float = Field(default=2.0)         # USD notional per order
+    max_per_window: float = Field(default=6.0)        # USD across a single market window
+    daily_loss_limit: float = Field(default=5.0)      # USD; halts trading when hit
+    max_exposure: float = Field(default=10.0)         # USD total open exposure
     max_drawdown_pct: float = Field(default=15.0)     # % from peak equity -> circuit break
     kelly_fraction: float = Field(default=0.25)       # fractional Kelly sizing
 

@@ -42,6 +42,26 @@ class _FakeRest:
         return {"market_positions": self._positions}
 
 
+class _FlakyPositionsRest:
+    """get_positions raises — to test that reconcile keeps the current book."""
+
+    def __init__(self):
+        self.signer = object()
+
+    async def get_positions(self, **_):
+        raise RuntimeError("kalshi 503")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_book_on_api_error():
+    # A transient positions API error must NOT wipe real positions (which would
+    # leave them unmanaged on the live account).
+    om = OrderManager(rest=_FlakyPositionsRest(), mode="live", balance=100.0)
+    om.position("MKT-A", "up").add(10, 0.40)
+    await om.reconcile_live_positions()
+    assert om.position("MKT-A", "up").quantity == 10  # preserved on error
+
+
 @pytest.mark.asyncio
 async def test_reconcile_live_positions_maps_kalshi_book():
     rest = _FakeRest([

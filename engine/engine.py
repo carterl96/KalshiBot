@@ -233,6 +233,7 @@ class TradingEngine:
         self.running = True
         if self.mode == "live":
             await self.orders.sync_live_balance()
+            self.orders.reset_positions()  # start flat even if reconcile errors
             await self.orders.reconcile_live_positions()
         self.spot.start()
         self.kalshi_ws.start()
@@ -279,8 +280,10 @@ class TradingEngine:
         self.orders.mode = mode
         if mode == "live":
             await self.orders.sync_live_balance()
-            # Sync the book to real Kalshi positions so stale paper fills don't
-            # leak into live trading.
+            # Drop stale paper fills first, then sync to real Kalshi positions —
+            # so even if the reconcile call errors we start flat, not holding
+            # phantom paper positions on the live account.
+            self.orders.reset_positions()
             await self.orders.reconcile_live_positions()
         else:
             self.orders.reset_positions()
@@ -589,10 +592,14 @@ class TradingEngine:
     async def _equity_loop(self) -> None:
         was_broken = False
         while self.running:
-            # Reconcile live cash against Kalshi (ground truth) every ~30s so the
-            # local balance can't drift from the real account between fills.
+            # Reconcile live cash AND positions against Kalshi (ground truth)
+            # every ~30s so neither can drift from the real account between
+            # fills. Position reconcile is transactional (keeps the book on a
+            # transient error), and self-heals any phantom fill from the
+            # defensive fill-count parsing.
             if self.mode == "live" and time.time() - self._last_balance_sync > 30.0:
                 await self.orders.sync_live_balance()
+                await self.orders.reconcile_live_positions()
                 self._last_balance_sync = time.time()
             equity = self.orders.equity(self._mark_prices())
             self.risk.record_equity(equity)

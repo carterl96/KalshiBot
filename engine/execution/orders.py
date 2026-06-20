@@ -310,14 +310,18 @@ class OrderManager:
         matches the actual Kalshi account instead of stale paper fills. On a
         fresh account this simply yields an empty book.
         """
-        self.positions.clear()
         if not (self.mode == "live" and self.rest and self.rest.signer):
+            self.positions.clear()
             return
+        # Fetch FIRST, then replace — so a transient API error keeps the current
+        # book instead of silently wiping it (critical when reconciling live
+        # positions periodically: an empty book would unmanage real positions).
         try:
             resp = await self.rest.get_positions()
         except Exception as exc:  # noqa: BLE001
-            log.warning("position reconcile failed: %s", exc)
+            log.warning("position reconcile failed (keeping current book): %s", exc)
             return
+        self.positions.clear()
         count = 0
         for mp in resp.get("market_positions", []):
             ticker = mp.get("ticker")
