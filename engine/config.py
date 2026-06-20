@@ -99,9 +99,12 @@ class Settings(BaseSettings):
     # When on, the LLM's parameter proposals are applied automatically (within
     # hard safety rails + auto-revert), instead of waiting for a manual click.
     llm_autotune_enabled: bool = Field(default=True)
-    # Allow auto-tuning while trading LIVE. Default OFF: in live mode proposals
-    # are logged but only applied if you opt in (paper always auto-tunes).
-    llm_autotune_live: bool = Field(default=False)
+    # Allow the AI to adapt the strategy while trading LIVE. On by default: the
+    # AI is the point. It's bounded — it can only nudge whitelisted strategy
+    # knobs within clamped ranges, never the hard risk caps, needs ~10 settled
+    # windows before acting, and auto-reverts changes that hurt EV. With the
+    # safe-by-default daily loss limit, the worst a bad tweak can do is capped.
+    llm_autotune_live: bool = Field(default=True)
     # Settled windows to observe before judging (and possibly reverting) a change.
     llm_autotune_min_settles: int = Field(default=10)
 
