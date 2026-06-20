@@ -240,10 +240,16 @@ async def apply_proposal(proposal_id: int, _: None = Depends(require_auth)):
     except Exception:
         raise HTTPException(status_code=400, detail="invalid params JSON")
     eng = get_engine()
-    eng.risk.params.update(**params)
+    # Route to the right place: strategy knobs (min_edge, stops, kelly…) via the
+    # tunable-override path, and any remaining risk caps via risk params.
+    applied = eng.apply_param_overrides(params)
+    remaining = {k: v for k, v in params.items() if k not in applied}
+    if remaining:
+        eng.risk.params.update(**remaining)
+        applied.update(remaining)
     await store.update_proposal_status(proposal_id, "applied")
     await eng.broadcast_state()
-    return {"ok": True, "applied_params": params}
+    return {"ok": True, "applied_params": applied}
 
 
 @app.post("/api/proposals/{proposal_id}/dismiss")

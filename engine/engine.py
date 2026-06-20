@@ -35,6 +35,9 @@ from engine.markets import MarketInfo, MarketManager
 from engine.pricing.model import VolEstimator, prob_above
 from engine.risk.limits import RiskEngine, RiskParams
 from engine.strategy.edge import Signal, evaluate
+from engine.strategy.autotune import (
+    AutoTuner, clamp_params, TUNABLE_BOUNDS, WINDOW_PARAMS, RISK_PARAMS,
+)
 from engine.data.brrny import BRRNYFeed
 from engine.data.tick_collector import TickCollector
 from engine.telemetry.calibration import CalibrationTracker
@@ -84,6 +87,11 @@ class TradingEngine:
         self.calibration = CalibrationTracker()
         self._llm_proposal_counter = 0   # run proposals every N LLM cycles
 
+        # Autonomous self-tuning controller + settled-window counter (the AI's
+        # feedback signal for whether a change helped or hurt).
+        self.autotuner = AutoTuner(min_eval_settles=settings.llm_autotune_min_settles)
+        self._settle_count = 0
+
         # Alert manager (fires webhooks on kill/breaker/loss events).
         self.alerts = AlertManager(
             webhook_url=settings.alert_webhook_url,
@@ -108,6 +116,32 @@ class TradingEngine:
         )
 
         self._build_from_settings(settings)
+
+    def apply_param_overrides(self, params: dict) -> dict:
+        """Apply tunable strategy params at runtime, routing each to the right
+        place (Settings / live WindowManager / RiskEngine). Only whitelisted,
+        clamped params are honored — hard risk caps can't be touched here.
+
+        Used by both the autonomous tuner and the manual "apply proposal" button
+        (which previously only updated risk params, so strategy knobs like
+        min_edge silently did nothing).
+        """
+        applied: dict = {}
+        for k, v in params.items():
+            if k not in TUNABLE_BOUNDS:
+                continue
+            # Persist on Settings so a WindowManager rebuild keeps the value.
+            setattr(self.settings, k, v)
+            if k in WINDOW_PARAMS:
+                setattr(self.window_mgr, k, v)
+            elif k in RISK_PARAMS:
+                self.risk.params.update(**{k: v})
+            applied[k] = v
+        return applied
+
+    def _tunable_snapshot(self, keys) -> dict:
+        """Current values of the given tunable params (for revert)."""
+        return {k: getattr(self.settings, k) for k in keys if hasattr(self.settings, k)}
 
     def _new_window_manager(self) -> WindowManager:
         """Build a WindowManager wired to the current strategy/stop settings."""
@@ -612,6 +646,7 @@ class TradingEngine:
             return
         pnl = self.orders.settle(ticker, up_wins)
         self.risk.record_realized(pnl)
+        self._settle_count += 1  # feedback signal for the autonomous tuner
         # Resolve calibration predictions and tick snapshots.
         self.calibration.resolve(ticker, up_wins)
         await self.store.resolve_predictions(ticker, up_wins)
@@ -656,20 +691,84 @@ class TradingEngine:
                 log.warning("llm loop error: %s", exc)
 
     async def _run_proposal_cycle(self) -> None:
-        """Ask the LLM to propose parameter tweaks based on calibration."""
+        """Autonomous self-tuning loop (the AI adapts the strategy itself).
+
+        Each cycle either (a) judges an in-flight experiment and keeps/reverts
+        it, (b) waits for a running experiment to gather data, or (c) asks the AI
+        for a new change and applies it under the safety rails. When autotune is
+        off (or we're live without opt-in), proposals are stored for manual
+        review instead of auto-applied.
+        """
         if self.calibration.resolution_count() < 20:
-            return  # not enough data yet
+            return  # not enough resolved data to learn from yet
+
+        autonomous = self.settings.llm_autotune_enabled and not (
+            self.mode == "live" and not self.settings.llm_autotune_live
+        )
+        tuner = self.autotuner
+        pnl = self.orders.realized_pnl
+        settles = self._settle_count
+
+        # (a) Judge an experiment that has observed enough settled windows.
+        if autonomous and tuner.ready_to_eval(settles):
+            ev = tuner.evaluate(pnl, settles)
+            if ev["revert_to"]:
+                self.apply_param_overrides(ev["revert_to"])
+            await self._log_autotune(
+                action=f"auto_{ev['decision']}", detail=ev["outcome"]
+            )
+            log.info("[autotune] %s experiment: %s", ev["decision"], ev["outcome"])
+            await self.broadcast_state()
+            return
+
+        # (b) An experiment is running but needs more data — hold steady.
+        if autonomous and tuner.experiment is not None:
+            return
+
+        # (c) Ask the AI for a new change.
         cal_summary = self.calibration.summary()
         losses = self.calibration.recent_losing_trades(n=20)
-        proposal = await self.llm.propose_params(cal_summary, losses)
-        if proposal and proposal.get("params"):
+        proposal = await self.llm.propose_params(
+            cal_summary, losses, recent_outcomes=tuner.recent_outcomes()
+        )
+        if not proposal or not proposal.get("params"):
+            return
+        changed = clamp_params(proposal["params"])
+        if not changed:
+            return
+
+        if autonomous:
+            prev = self._tunable_snapshot(changed.keys())
+            self.apply_param_overrides(changed)
+            tuner.start_experiment(prev, changed, pnl, settles)
+            await self._log_autotune(
+                action="auto_apply",
+                detail={"description": proposal["description"], "changed": changed,
+                        "from": prev},
+            )
+            log.info("[autotune] applied %s — %s",
+                     changed, proposal["description"][:80])
+        else:
+            # Autotune off / live without opt-in: store for manual apply.
             import json
             await self.store.add_proposal(
                 description=proposal["description"],
-                params_json=json.dumps(proposal["params"]),
+                params_json=json.dumps(changed),
                 suggested_by=self.guidance.source or "llm",
             )
-            log.info("LLM proposal stored: %s", proposal["description"][:80])
+            log.info("LLM proposal stored for manual review: %s",
+                     proposal["description"][:80])
+        await self.broadcast_state()
+
+    async def _log_autotune(self, action: str, detail: dict) -> None:
+        """Audit-log an autonomous tuning action (the AI's strategy memory)."""
+        import json
+        await self.store.add_decision(
+            ticker="*", decision="autotune",
+            model_prob=0.0, market_price=0.0, edge=0.0,
+            action_taken=action, source="autotune",
+            detail=json.dumps(detail, default=str)[:480],
+        )
 
     def _llm_context(self) -> dict:
         return {
@@ -739,6 +838,14 @@ class TradingEngine:
             "circuit_broken": self.risk.circuit_broken,
             "kill_switched": self.risk.kill_switched,
             "risk_params": self.risk.params.to_dict(),
+            "autotune": {
+                "enabled": self.settings.llm_autotune_enabled,
+                "live_allowed": self.settings.llm_autotune_live,
+                "experiment_active": self.autotuner.experiment is not None,
+                "baseline_ev": round(self.autotuner.baseline_ev, 4),
+                "recent_outcomes": self.autotuner.recent_outcomes(5),
+                "settled_windows": self._settle_count,
+            },
         }
 
     def calibration_snapshot(self) -> dict:

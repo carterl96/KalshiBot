@@ -41,38 +41,39 @@ async def test_advise_paused_when_over_budget():
 
 
 @pytest.mark.asyncio
-async def test_advise_fails_over_to_gemini(monkeypatch):
+async def test_advise_fails_over_to_claude(monkeypatch):
+    # Gemini is primary; if it errors we fail over to Claude.
     llm = LLMMetaLayer(anthropic_key="k", gemini_key="g", daily_token_budget=0)
 
-    async def claude_fail(*a, **k):
-        return None  # simulate Claude error
+    async def gemini_fail(*a, **k):
+        return None
 
-    async def gemini_ok(system, prompt, max_tokens):
+    async def claude_ok(system, prompt, model, max_tokens):
         return '{"regime":"calm","risk_dial":0.8,"active_strategy":"edge","note":"ok"}'
 
-    monkeypatch.setattr(llm, "_call_claude", claude_fail)
-    monkeypatch.setattr(llm, "_call_gemini", gemini_ok)
+    monkeypatch.setattr(llm, "_call_gemini", gemini_fail)
+    monkeypatch.setattr(llm, "_call_claude", claude_ok)
     g = await llm.advise({"x": 1})
-    assert g.source == "gemini" and g.risk_dial == pytest.approx(0.8)
+    assert g.source == "claude" and g.risk_dial == pytest.approx(0.8)
     await llm.close()
 
 
 @pytest.mark.asyncio
-async def test_advise_prefers_claude_no_double_call(monkeypatch):
+async def test_advise_prefers_gemini_no_double_call(monkeypatch):
     llm = LLMMetaLayer(anthropic_key="k", gemini_key="g", daily_token_budget=0)
     calls = {"claude": 0, "gemini": 0}
 
-    async def claude_ok(system, prompt, model, max_tokens):
-        calls["claude"] += 1
-        return '{"regime":"trending","risk_dial":1.1,"active_strategy":"edge","note":"x"}'
-
     async def gemini_ok(system, prompt, max_tokens):
         calls["gemini"] += 1
+        return '{"regime":"trending","risk_dial":1.1,"active_strategy":"edge","note":"x"}'
+
+    async def claude_ok(system, prompt, model, max_tokens):
+        calls["claude"] += 1
         return '{"regime":"calm","risk_dial":0.5,"active_strategy":"edge","note":"y"}'
 
-    monkeypatch.setattr(llm, "_call_claude", claude_ok)
     monkeypatch.setattr(llm, "_call_gemini", gemini_ok)
+    monkeypatch.setattr(llm, "_call_claude", claude_ok)
     g = await llm.advise({"x": 1})
-    # Claude succeeded -> Gemini must NOT be called (failover, not ensemble).
-    assert g.source == "claude" and calls == {"claude": 1, "gemini": 0}
+    # Gemini (primary) succeeded -> Claude must NOT be called.
+    assert g.source == "gemini" and calls == {"claude": 0, "gemini": 1}
     await llm.close()

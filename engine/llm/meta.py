@@ -93,16 +93,21 @@ SYSTEM_PROMPT = (
 )
 
 PROPOSAL_SYSTEM = (
-    "You are a quantitative analyst reviewing a trading bot's calibration data "
-    "and recent losses. Propose parameter adjustments to improve edge and EV. "
-    "Respond ONLY with JSON: "
-    '{"description": "<1-2 sentences explaining why>", '
-    '"params": {"min_edge": <float|null>, "kelly_fraction": <float|null>, '
-    '"fee_buffer": <float|null>, "vol_lookback_s": <int|null>, '
-    '"max_per_trade": <float|null>, "max_per_window": <float|null>}}. '
-    "Omit any param you do not want to change (set it to null). "
-    "Only suggest changes that are grounded in the data. "
-    "Be conservative — small incremental improvements, not wild swings."
+    "You are the autonomous self-tuning brain for a Kalshi crypto trading bot. "
+    "You continuously improve the strategy from realized performance. You are "
+    "given calibration data, recent losing trades, and the outcomes of your own "
+    "past tuning changes (which were kept vs auto-reverted because they hurt "
+    "EV). Propose ONE small, grounded adjustment to improve expected value net "
+    "of fees. Respond ONLY with JSON: "
+    '{"description": "<1-2 sentences explaining the reasoning>", '
+    '"params": {"min_edge": <float|null>, "min_model_prob": <float|null>, '
+    '"fee_buffer": <float|null>, "kelly_fraction": <float|null>, '
+    '"vol_lookback_s": <int|null>, "stop_model_floor": <float|null>, '
+    '"stop_model_drop": <float|null>, "stop_catastrophe_drop": <float|null>}}. '
+    "Optimize EXPECTED VALUE, not win rate (a high win rate from overpaying "
+    "loses money). Omit a param by setting it to null. Do NOT re-propose a "
+    "change that was just reverted. Small incremental steps, never wild swings. "
+    "Hard risk caps are not yours to change."
 )
 
 
@@ -247,11 +252,9 @@ class LLMMetaLayer:
     # ---- public API ----
 
     async def advise(self, context: dict) -> MetaGuidance:
-        """Routine supervisor call with provider failover.
-
-        Claude (cheap routine model) is primary; if it errors we fail over to
-        Gemini. We do NOT call both every cycle — that doubled cost for little
-        gain. Calls stop once the daily token budget is exhausted.
+        """Routine supervisor call. Gemini is primary (it's the strategy brain);
+        Claude is the failover when Gemini errors. We do NOT call both every
+        cycle — that doubled cost. Calls stop once the token budget is spent.
         """
         if not self.enabled:
             return MetaGuidance()
@@ -260,6 +263,11 @@ class LLMMetaLayer:
                                 source="budget")
 
         prompt = json.dumps(context, default=str)[:6000]
+        if self.gemini_key:
+            text = await self._call_gemini(SYSTEM_PROMPT, prompt, 256)
+            g = _parse_guidance(text, "gemini") if text else None
+            if g:
+                return g
         if self.anthropic_key:
             text = await self._call_claude(
                 SYSTEM_PROMPT, prompt, self.claude_model, 256
@@ -267,35 +275,39 @@ class LLMMetaLayer:
             g = _parse_guidance(text, "claude") if text else None
             if g:
                 return g
-        if self.gemini_key:
-            text = await self._call_gemini(SYSTEM_PROMPT, prompt, 256)
-            g = _parse_guidance(text, "gemini") if text else None
-            if g:
-                return g
         return MetaGuidance(note="LLM call failed; using defaults")
 
     async def propose_params(
-        self, calibration_summary: dict, recent_losses: list[dict]
+        self,
+        calibration_summary: dict,
+        recent_losses: list[dict],
+        recent_outcomes: list[dict] | None = None,
     ) -> dict | None:
-        """Periodic deep review: propose parameter tweaks from calibration data.
+        """Periodic deep review: propose strategy-parameter tweaks from realized
+        performance. Gemini is primary; Claude is the failover.
 
-        Uses the (optionally larger) review model, with Gemini failover. Returns
-        a dict with ``description`` and ``params``, or None.
+        ``recent_outcomes`` is the auto-tuner's memory (which past changes were
+        kept vs reverted), so the AI doesn't keep re-proposing what already
+        failed. Returns a dict with ``description`` and ``params``, or None.
         """
         if not self.enabled or self.budget.over:
             return None
         prompt = json.dumps(
-            {"calibration": calibration_summary, "recent_losses": recent_losses},
+            {
+                "calibration": calibration_summary,
+                "recent_losses": recent_losses,
+                "past_tuning_outcomes": recent_outcomes or [],
+            },
             default=str,
         )[:6000]
+        if self.gemini_key:
+            text = await self._call_gemini(PROPOSAL_SYSTEM, prompt, 512)
+            p = _parse_proposal(text) if text else None
+            if p:
+                return p
         if self.anthropic_key:
             text = await self._call_claude(
                 PROPOSAL_SYSTEM, prompt, self.claude_review_model, 512
             )
-            p = _parse_proposal(text) if text else None
-            if p:
-                return p
-        if self.gemini_key:
-            text = await self._call_gemini(PROPOSAL_SYSTEM, prompt, 512)
             return _parse_proposal(text) if text else None
         return None

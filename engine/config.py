@@ -92,6 +92,16 @@ class Settings(BaseSettings):
     llm_model_gemini: str = Field(default="gemini-2.5-flash")
     llm_daily_token_budget: int = Field(default=1_000_000)  # 0 = unlimited
 
+    # --- Autonomous self-tuning (the AI adapts the strategy itself) ---
+    # When on, the LLM's parameter proposals are applied automatically (within
+    # hard safety rails + auto-revert), instead of waiting for a manual click.
+    llm_autotune_enabled: bool = Field(default=True)
+    # Allow auto-tuning while trading LIVE. Default OFF: in live mode proposals
+    # are logged but only applied if you opt in (paper always auto-tunes).
+    llm_autotune_live: bool = Field(default=False)
+    # Settled windows to observe before judging (and possibly reverting) a change.
+    llm_autotune_min_settles: int = Field(default=10)
+
     # --- Alerts (optional) ---
     # Discord/Slack-compatible incoming webhook URL.
     alert_webhook_url: str = Field(default="")

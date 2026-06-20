@@ -63,13 +63,23 @@ No feature makes money if the core edge isn't real. Status:
    to Gemini (no more always-calling-both, which doubled cost). Token usage is
    parsed from both providers' responses.
    - TODO: confirm it's firing live once keys are configured (watch `llm_usage`).
-6. **Regime detection + param proposals** — partial (advise returns a regime;
-   proposals run on a cadence). TODO: deterministic de-risk/pause when
-   calibration degrades ("strategy stopped working" = regime shift).
-7. **Strategy memory**: Postgres performance table (per strategy/regime: win
-   rate, EV net of fees, Brier, sample size) + a **"Strategies" tab** showing
-   what's actually worked. AI reads a compact summary; proposals surface for
-   one-click apply (no blind live RL). — TODO
+6. **Autonomous self-tuning** — DONE: the AI now adapts the strategy itself
+   (`engine/strategy/autotune.py`), no manual clicks. Closed loop:
+   propose (Gemini-primary) → clamp to safe bounds → apply → run an
+   "experiment" for N settled windows → compare realized EV/settle vs the
+   pre-change baseline → **auto-revert if worse, keep if better**. Outcomes are
+   logged as the AI's memory and fed back into the next proposal so it doesn't
+   repeat reverted changes.
+   - Rails: AI may only touch whitelisted strategy knobs (edge, conviction,
+     stops, Kelly); it can NEVER loosen hard risk caps. Auto-applies in paper;
+     live requires `llm_autotune_live` opt-in.
+   - Also fixed a latent bug: manual "apply proposal" only updated risk params,
+     so strategy knobs (min_edge etc.) silently did nothing — now routed via the
+     same `apply_param_overrides` path.
+7. **Strategy memory**: autotune outcomes are logged (decisions, source=
+   "autotune") and surfaced in the state snapshot (`autotune.recent_outcomes`).
+   - TODO: a dedicated **"Strategies" tab** visualizing this history + per-regime
+     performance. (Backend signal now exists.)
 
 ## Phase 2C — Money-accuracy (gate before going live again)
 
