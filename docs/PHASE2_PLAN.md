@@ -31,7 +31,26 @@ doesn't panic on noise.
    - TODO: explicit near-close preference + regime / time-of-day awareness
      (overnight = thin book → require more edge or stand down).
 3. **Calibration-driven auto-tuning** of thresholds (min_edge, stop distance,
-   min model prob) from realized results. — TODO
+   min model prob) from realized results. — TODO (sweep tool now exists; needs
+   real data to tune against).
+
+### Profit validation (the actual money lever) — partly DONE
+
+No feature makes money if the core edge isn't real. Status:
+- DONE: backtest runner now faithfully replays the **production** strategy
+  (min_model_prob filter + model-aware exits) and charges **realistic Kalshi
+  fees** (`engine/execution/fees.py`). Reports net P&L, fees, and **EV/trade**.
+- DONE: parameter **sweep** (`engine/backtest/sweep.py`) ranks configs by
+  EV/trade; **synthetic generator** (`engine/backtest/synthetic.py`) validates
+  the machinery converts a known edge into profit net of fees and stands down
+  with no edge. (`python -m engine.backtest.sweep`)
+- **BLOCKER → real data**: we have NO stored ticks (engine has been off). The
+  zero-risk way to get them is a **paper run** (engine on, paper mode): it
+  collects ticks + calibration. Then backtest/sweep on real data tells us if a
+  profitable config exists and what it is. Until then, profitability is unproven.
+- KEY QUESTION the data answers: is our `fair_prob` (GBM + realized vol)
+  better-calibrated than Kalshi's implied price? If not, there's no edge to
+  harvest after fees, and the fix is the **pricing model**, not more features.
 
 ## Phase 2B — AI layer (cost-controlled, resilient, adaptive)
 

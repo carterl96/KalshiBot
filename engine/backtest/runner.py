@@ -43,6 +43,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine.execution.fees import kalshi_fee
 from engine.execution.orders import OrderManager
 from engine.execution.window import WindowManager
 from engine.pricing.model import fair_prob
@@ -70,12 +71,23 @@ class BacktestParams:
     starting_balance: float = 1000.0
     min_edge: float = 0.04
     fee_buffer: float = 0.02
+    min_model_prob: float = 0.58        # entry conviction floor (matches production)
     kelly_fraction: float = 0.25
     max_per_trade: float = 20.0
     max_per_window: float = 60.0
     max_exposure: float = 200.0
     daily_loss_limit: float = 50.0
     max_drawdown_pct: float = 15.0
+    # Realistic Kalshi fees on every fill (entries + exits). Turning this off
+    # measures gross edge; leaving it on measures what you'd actually keep.
+    apply_fees: bool = True
+    fee_rate: float = 0.07
+    # Model-aware stop-loss params (grace/debounce default to 0/1 for backtest:
+    # historical ticks are coarse and noise-free, so the anti-noise machinery
+    # that matters live is not exercised here).
+    stop_model_floor: float = 0.35
+    stop_model_drop: float = 0.25
+    stop_catastrophe_drop: float = 0.30
 
 
 @dataclass
@@ -95,6 +107,7 @@ class BacktestResult:
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[tuple[float, float]] = field(default_factory=list)
     predictions: list[tuple[float, int]] = field(default_factory=list)  # (model_prob, outcome)
+    total_fees: float = 0.0
 
     @property
     def final_equity(self) -> float:
@@ -128,15 +141,23 @@ class BacktestResult:
     def n_trades(self) -> int:
         return sum(1 for t in self.trades if t.action in ("entry", "scale_in", "hedge"))
 
+    @property
+    def ev_per_trade(self) -> Optional[float]:
+        """Net P&L divided by number of entries — the bottom-line edge metric."""
+        n = self.n_trades
+        return (self.total_pnl / n) if n > 0 else None
+
     def summary(self) -> str:
+        ev = self.ev_per_trade
         lines = [
             "=== Backtest Results ===",
-            f"  Trades:      {self.n_trades}",
+            f"  Trades:       {self.n_trades}",
             f"  Final equity: ${self.final_equity:.2f}",
-            f"  Total P&L:   ${self.total_pnl:+.2f} ({self.pnl_pct:+.1f}%)",
-            f"  Win rate:    {f'{self.win_rate*100:.1f}%' if self.win_rate is not None else '—'}",
-            f"  Brier score: {f'{self.brier_score:.4f}' if self.brier_score is not None else '—'}",
-            f"  Equity points: {len(self.equity_curve)}",
+            f"  Net P&L:      ${self.total_pnl:+.2f} ({self.pnl_pct:+.1f}%)",
+            f"  Fees paid:    ${self.total_fees:.2f}",
+            f"  EV / trade:   {f'${ev:+.3f}' if ev is not None else '—'}",
+            f"  Win rate:     {f'{self.win_rate*100:.1f}%' if self.win_rate is not None else '—'}",
+            f"  Brier score:  {f'{self.brier_score:.4f}' if self.brier_score is not None else '—'}",
         ]
         return "\n".join(lines)
 
@@ -146,6 +167,8 @@ class BacktestResult:
             "final_equity": round(self.final_equity, 2),
             "total_pnl": round(self.total_pnl, 2),
             "pnl_pct": round(self.pnl_pct, 2),
+            "total_fees": round(self.total_fees, 2),
+            "ev_per_trade": round(self.ev_per_trade, 4) if self.ev_per_trade is not None else None,
             "win_rate": round(self.win_rate, 4) if self.win_rate is not None else None,
             "brier_score": round(self.brier_score, 4) if self.brier_score is not None else None,
             "n_equity_points": len(self.equity_curve),
@@ -173,7 +196,16 @@ class BacktestRunner:
             )
         )
         orders = OrderManager(rest=None, mode="paper", balance=p.starting_balance)
-        window_mgr = WindowManager()
+        # grace=0 / debounce=1: historical ticks are coarse & noise-free, so the
+        # live anti-noise machinery is disabled; the model stop fires on the
+        # first adverse tick. This still faithfully tests the THESIS-based exit.
+        window_mgr = WindowManager(
+            stop_model_floor=p.stop_model_floor,
+            stop_model_drop=p.stop_model_drop,
+            stop_catastrophe_drop=p.stop_catastrophe_drop,
+            stop_debounce=1,
+            stop_grace_s=0.0,
+        )
         result = BacktestResult(params=p)
 
         # Group ticks by window (ticker) and sort chronologically.
@@ -203,17 +235,20 @@ class BacktestRunner:
 
             result.predictions.append((model_p, tick.outcome))
 
-            # Near-close exit checks.
+            # Exit checks — same model-aware exit_signal used in production.
+            # ``ask_prob`` is used as a proxy mark/sell price (the Tick has no
+            # bid); the model-aware stop keys off model_p, which we have exactly.
             pos = orders.position(ticker, tick.side)
             if pos.quantity > 0:
-                if window_mgr.should_take_profit(ticker, tick.side, model_p, tick.tau):
-                    self._close(ticker, tick.side, pos, ask_prob, "take_profit", orders, result)
-                    continue
-                if window_mgr.should_cut_loss(ticker, tick.side, model_p, tick.tau):
-                    self._close(ticker, tick.side, pos, ask_prob, "cut_loss", orders, result)
+                reason = window_mgr.exit_signal(
+                    ticker, tick.side, ask_prob, pos.avg_price, model_p, tick.tau
+                )
+                if reason:
+                    self._close(ticker, tick.side, pos, ask_prob, reason, orders, result)
                     continue
 
-            if edge < p.min_edge:
+            # Entry gates: edge AND conviction floor (matches production).
+            if edge < p.min_edge or model_p < p.min_model_prob:
                 continue
 
             check = risk.check(
@@ -232,13 +267,15 @@ class BacktestRunner:
                 continue
 
             label = window_mgr.entry_label(ticker, tick.side)
-            cost = check.quantity * ask_prob
+            fee = kalshi_fee(check.quantity, ask_prob, p.fee_rate) if p.apply_fees else 0.0
+            cost = check.quantity * ask_prob + fee
             if cost > orders.balance + 1e-9:
                 continue
 
             orders.balance -= cost
+            result.total_fees += fee
             orders.position(ticker, tick.side).add(check.quantity, ask_prob)
-            window_mgr.record_entry(ticker, tick.side)
+            window_mgr.record_entry(ticker, tick.side, model_prob=model_p)
             result.trades.append(
                 TradeRecord(
                     ts=tick.ts, ticker=ticker, side=tick.side, action=label,
@@ -287,12 +324,15 @@ class BacktestRunner:
         orders: OrderManager,
         result: BacktestResult,
     ) -> None:
-        proceeds = pos.quantity * price
-        pnl = pos.quantity * (price - pos.avg_price)
+        qty = pos.quantity
+        fee = kalshi_fee(qty, price, result.params.fee_rate) if result.params.apply_fees else 0.0
+        proceeds = qty * price - fee
+        pnl = qty * (price - pos.avg_price) - fee
         orders.balance += proceeds
         orders.realized_pnl += pnl
-        pos.add(-pos.quantity, price)
+        result.total_fees += fee
+        pos.add(-qty, price)
         result.trades.append(
             TradeRecord(ts=0.0, ticker=ticker, side=side, action=reason,
-                        quantity=pos.quantity, price=price, pnl=pnl)
+                        quantity=qty, price=price, pnl=pnl)
         )
