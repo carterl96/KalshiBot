@@ -14,10 +14,10 @@ const NAV = [
   { href: "/", label: "Dashboard", icon: "▣" },
   { href: "/markets", label: "Markets", icon: "≋" },
   { href: "/controls", label: "Controls", icon: "⚙" },
-  { href: "/ai", label: "AI", icon: "✦" },
+  { href: "/ai", label: "AI activity", icon: "✦" },
   { href: "/history", label: "History", icon: "≡" },
   { href: "/backtest", label: "Backtest", icon: "◎" },
-  { href: "/setup", label: "Setup", icon: "⚿" },
+  { href: "/setup", label: "Settings", icon: "⚿" },
 ];
 
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {

@@ -273,13 +273,18 @@ export default function SetupPage() {
 
       <Card title="AI models (optional)">
         <div className="space-y-4">
+          <p className="text-xs leading-relaxed text-muted">
+            When enabled, Claude and Gemini review recent performance and advise
+            how aggressively to bet. They never place trades on their own. Leave
+            this off to run on the math model alone.
+          </p>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
               checked={form.llm_enabled}
               onChange={(e) => set("llm_enabled", e.target.checked)}
             />
-            Enable Claude + Gemini meta-layer (advisory risk dial)
+            Let AI advise how aggressively to bet
           </label>
           <div className="grid grid-cols-2 gap-4">
             <SecretInput
@@ -310,7 +315,10 @@ export default function SetupPage() {
             onClear={() => clearSecret("alert_webhook_url")}
             placeholder="Paste a Discord/Slack incoming webhook URL to receive alerts."
           />
-          <Field label="Equity drop alert threshold (%)" hint="fire alert when equity drops this % from peak">
+          <Field
+            label="Alert me if my account drops by (%)"
+            hint="Sends an alert when the account falls this far from its peak."
+          >
             <input
               type="number"
               step="0.5"
@@ -335,25 +343,36 @@ export default function SetupPage() {
       </Card>
 
       <Card title="Trading parameters">
+        <p className="mb-4 text-xs leading-relaxed text-muted">
+          Defaults work well to start. These control which markets the bot
+          watches and how picky it is. You can fine-tune risk limits later on
+          the Controls page.
+        </p>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
-          <Field label="Series (comma-sep)" hint="Kalshi series prefixes">
+          <Field
+            label="Markets to watch"
+            hint="Kalshi series prefixes, comma-separated."
+          >
             <input
               value={form.series}
               onChange={(e) => set("series", e.target.value)}
               className={`${input} num`}
             />
           </Field>
-          <Field label="Start mode">
+          <Field label="Start in" hint="Which mode the bot boots into.">
             <select
               value={form.start_mode}
               onChange={(e) => set("start_mode", e.target.value)}
               className={input}
             >
-              <option value="paper">Paper</option>
-              <option value="live">Live</option>
+              <option value="paper">Paper (practice)</option>
+              <option value="live">Live (real money)</option>
             </select>
           </Field>
-          <Field label="Starting balance ($)" hint="paper bankroll">
+          <Field
+            label="Practice balance ($)"
+            hint="Pretend bankroll for paper mode."
+          >
             <input
               type="number"
               value={form.starting_balance}
@@ -361,7 +380,10 @@ export default function SetupPage() {
               className={`${input} num`}
             />
           </Field>
-          <Field label="Min edge" hint="prob units, e.g. 0.04">
+          <Field
+            label="Minimum edge to bet"
+            hint="How good a deal must be, e.g. 0.04 = 4%."
+          >
             <input
               type="number"
               step="0.01"
@@ -370,7 +392,10 @@ export default function SetupPage() {
               className={`${input} num`}
             />
           </Field>
-          <Field label="Fee buffer" hint="haircut for fees/spread">
+          <Field
+            label="Fee cushion"
+            hint="Extra margin to cover fees and spread."
+          >
             <input
               type="number"
               step="0.01"
@@ -379,7 +404,10 @@ export default function SetupPage() {
               className={`${input} num`}
             />
           </Field>
-          <Field label="Vol lookback (s)" hint="spot vol window">
+          <Field
+            label="Volatility window (s)"
+            hint="How far back to measure price swings."
+          >
             <input
               type="number"
               value={form.vol_lookback_s}
@@ -394,7 +422,7 @@ export default function SetupPage() {
             checked={form.autostart}
             onChange={(e) => set("autostart", e.target.checked)}
           />
-          Auto-start engine on boot
+          Start the bot automatically when it boots up
         </label>
       </Card>
 

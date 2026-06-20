@@ -2,8 +2,22 @@
 
 import { useEffect, useState } from "react";
 import { Trade, api } from "@/lib/api";
-import { Badge, Button, Card, Empty } from "@/components/ui";
-import { ago, pnlClass, signed, ts } from "@/lib/format";
+import { Badge, Button, Card, Empty, Select } from "@/components/ui";
+import { ago, pnlClass, signed } from "@/lib/format";
+
+// Turn raw action codes into human verbs + a badge tone.
+function actionLabel(action: string): { text: string; tone: "accent" | "pos" | "muted" } {
+  switch (action) {
+    case "buy":
+      return { text: "Bought", tone: "accent" };
+    case "sell":
+      return { text: "Sold", tone: "pos" };
+    case "settle":
+      return { text: "Settled", tone: "muted" };
+    default:
+      return { text: action || "—", tone: "muted" };
+  }
+}
 
 function exportCsv(rows: Trade[]) {
   const headers = [
@@ -74,10 +88,10 @@ export default function HistoryPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-4 text-sm text-muted">
           <span>
-            Total P&L:{" "}
+            Total profit / loss:{" "}
             <span className={`font-semibold ${pnlClass(totalPnl)}`}>
               {signed(totalPnl)}
             </span>
@@ -85,34 +99,39 @@ export default function HistoryPage() {
           {trades.length > 0 && (
             <span>
               Win rate:{" "}
-              <span className="font-semibold">
+              <span className="font-semibold text-text">
                 {((wins / trades.length) * 100).toFixed(0)}%
               </span>{" "}
-              ({wins}/{trades.length})
+              ({wins} of {trades.length} bets won)
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          <select
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
-            className="rounded-lg border border-line bg-bg-soft px-2 py-1 text-sm"
+          <Select
+            value={String(limit)}
+            onChange={(v) => setLimit(Number(v))}
+            className="px-2 py-1"
           >
             <option value={100}>Last 100</option>
             <option value={200}>Last 200</option>
             <option value={500}>Last 500</option>
-          </select>
+          </Select>
           <Button onClick={() => exportCsv(rows)} disabled={rows.length === 0}>
-            Export CSV
+            Download CSV
           </Button>
         </div>
       </div>
 
       <Card title="Trade history">
         {offline ? (
-          <Empty>Engine offline.</Empty>
+          <Empty>
+            Can&apos;t reach the bot right now. Make sure the engine is running.
+          </Empty>
         ) : rows.length === 0 ? (
-          <Empty>No trades yet.</Empty>
+          <Empty>
+            No trades yet. Once the bot starts placing bets, they&apos;ll show
+            up here.
+          </Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="tbl">
@@ -120,55 +139,48 @@ export default function HistoryPage() {
                 <tr>
                   <th>When</th>
                   <th>Market</th>
-                  <th>Action</th>
-                  <th>Side</th>
-                  <th>Qty</th>
+                  <th>What happened</th>
+                  <th>Bet</th>
+                  <th>Contracts</th>
                   <th>Price</th>
                   <th>Mode</th>
-                  <th>P&L</th>
-                  <th>Cumulative</th>
-                  <th>Reason</th>
+                  <th>Profit / loss</th>
+                  <th>Running total</th>
+                  <th>Why</th>
                 </tr>
               </thead>
               <tbody>
-                {withCum.map((t) => (
-                  <tr key={t.id}>
-                    <td className="num text-muted">{ago(t.ts)}</td>
-                    <td className="num">{t.ticker}</td>
-                    <td className="uppercase text-xs">
-                      <Badge
-                        tone={
-                          t.action === "buy"
-                            ? "accent"
-                            : t.action === "settle"
-                            ? "muted"
-                            : "pos"
-                        }
-                      >
-                        {t.action}
-                      </Badge>
-                    </td>
-                    <td className="uppercase text-xs">{t.side || "—"}</td>
-                    <td className="num">{t.quantity || "—"}</td>
-                    <td className="num">
-                      {t.price ? `${(t.price * 100).toFixed(0)}¢` : "—"}
-                    </td>
-                    <td>
-                      <Badge tone={t.mode === "live" ? "live" : "paper"}>
-                        {t.mode}
-                      </Badge>
-                    </td>
-                    <td className={`num ${pnlClass(t.pnl)}`}>
-                      {t.pnl ? signed(t.pnl) : "—"}
-                    </td>
-                    <td className={`num ${pnlClass(t.cum_pnl)}`}>
-                      {signed(t.cum_pnl)}
-                    </td>
-                    <td className="max-w-[180px] truncate text-xs text-muted">
-                      {t.reason || "—"}
-                    </td>
-                  </tr>
-                ))}
+                {withCum.map((t) => {
+                  const act = actionLabel(t.action);
+                  return (
+                    <tr key={t.id}>
+                      <td className="num text-muted">{ago(t.ts)}</td>
+                      <td className="num">{t.ticker}</td>
+                      <td className="text-xs">
+                        <Badge tone={act.tone}>{act.text}</Badge>
+                      </td>
+                      <td className="text-xs capitalize">{t.side || "—"}</td>
+                      <td className="num">{t.quantity || "—"}</td>
+                      <td className="num">
+                        {t.price ? `${(t.price * 100).toFixed(0)}¢` : "—"}
+                      </td>
+                      <td>
+                        <Badge tone={t.mode === "live" ? "live" : "paper"}>
+                          {t.mode === "live" ? "Live" : "Paper"}
+                        </Badge>
+                      </td>
+                      <td className={`num ${pnlClass(t.pnl)}`}>
+                        {t.pnl ? signed(t.pnl) : "—"}
+                      </td>
+                      <td className={`num ${pnlClass(t.cum_pnl)}`}>
+                        {signed(t.cum_pnl)}
+                      </td>
+                      <td className="max-w-[180px] truncate text-xs text-muted">
+                        {t.reason || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
