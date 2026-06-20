@@ -213,7 +213,12 @@ class LLMMetaLayer:
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # Log the real Anthropic error body (e.g. bad model id, key
+                # without access) instead of a generic status string.
+                log.warning("Claude HTTP %s: %s", resp.status_code,
+                            resp.text[:300])
+                return None
             data = resp.json()
             usage = data.get("usage", {}) or {}
             self.budget.add(usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
@@ -232,19 +237,28 @@ class LLMMetaLayer:
                 json={
                     "systemInstruction": {"parts": [{"text": system}]},
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": max_tokens},
+                    "generationConfig": {
+                        "maxOutputTokens": max_tokens,
+                        "responseMimeType": "application/json",
+                        # Gemini 2.5 models "think" by default, which silently
+                        # eats the whole output budget and returns no text.
+                        # Disable it — we want fast, deterministic JSON, not
+                        # chain-of-thought.
+                        "thinkingConfig": {"thinkingBudget": 0},
+                    },
                 },
             )
             resp.raise_for_status()
             data = resp.json()
             meta = data.get("usageMetadata", {}) or {}
             self.budget.add(meta.get("totalTokenCount", 0))
-            return (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-            )
+            cand = (data.get("candidates") or [{}])[0]
+            parts = (cand.get("content", {}) or {}).get("parts", []) or []
+            text = "".join(p.get("text", "") for p in parts)
+            if not text:
+                log.warning("Gemini returned no text (finishReason=%s)",
+                            cand.get("finishReason"))
+            return text
         except Exception as exc:  # noqa: BLE001
             log.warning("Gemini call failed: %s", exc)
             return None
