@@ -65,14 +65,20 @@ doesn't panic on noise.
 
 ## Phase 2D — UX, notifications, SaaS groundwork
 
-11. **UI polish**: per-page simplification, reorganized Settings (simple
-    defaults up front, "Advanced" tucked away), readable history.
-    - DONE: responsive shell (mobile), plain-language dashboard, P&L range
-      toggle (24h/7d/30d/all), clearer chart, jargon → "Advanced".
+11. **UI polish** — DONE: full consumer-fintech redesign (typechecks + builds).
+    - responsive shell (mobile), plain-language dashboard, P&L range toggle.
+    - Controls: Conservative/Balanced/Aggressive risk presets, raw params behind
+      an "Advanced" disclosure, plain-language sections.
+    - Markets/History/AI/Backtest/Setup rewritten in plain language with
+      "what do these mean?" explainers; new Section/Disclosure/Toggle/Select
+      primitives.
+    - TODO (future): expose the new strategy knobs (min_model_prob, stop params,
+      LLM budget) in the UI; wire Toggle into Setup checkboxes.
 12. **Web push notifications** via OneSignal/FCM as a PWA (iOS 16.4+ with
     Add-to-Home-Screen). Alerts: errors, out-of-money, circuit breaker, big
-    win/loss.
+    win/loss. — TODO (needs a OneSignal/FCM account + keys from operator).
 13. **SaaS groundwork**: all Kalshi crypto markets → later multi-user/tenancy.
+    — TODO
 
 ---
 
