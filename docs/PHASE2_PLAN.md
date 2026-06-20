@@ -19,19 +19,19 @@ contracts.
 Goal: a strategy that wins more often *and* makes money, and a stop-loss that
 doesn't panic on noise.
 
-1. **Smarter stop-loss** (replaces pure price stop):
-   - Primary: **model-aware** — cut only when fair probability deteriorates
-     (spot moved decisively wrong), not on price wiggles.
-   - **Debounce**: adverse condition must persist N reads / ~seconds.
-   - **Vol- & time-scaled** stop distance (wide at open, tighter near close).
-   - **Catastrophe backstop**: one wide hard price stop (~−0.30) as a breaker.
+1. **Smarter stop-loss** (replaces pure price stop): — **DONE**
+   - DONE: **model-aware** stop — cuts when fair probability deteriorates
+     (below floor, or far below entry thesis), not on price wiggles.
+   - DONE: **debounce** (N consecutive adverse reads) + post-entry **grace**.
+   - DONE: **catastrophe backstop** — wide hard price stop fires immediately.
+   - TODO: explicit σ√τ vol-scaling of the stop *distance* (probability-based
+     stop already adapts to vol implicitly; explicit scaling is a refinement).
 2. **Entry selectivity** (raise green rate while keeping +EV):
-   - Minimum model-confidence filter (skip coin-flips even with tiny edge).
-   - Prefer high-conviction + near-close (low τ) setups.
-   - Regime / time-of-day awareness (overnight = thin book → require more edge
-     or stand down).
+   - DONE: minimum model-confidence filter (`min_model_prob`, skips coin-flips).
+   - TODO: explicit near-close preference + regime / time-of-day awareness
+     (overnight = thin book → require more edge or stand down).
 3. **Calibration-driven auto-tuning** of thresholds (min_edge, stop distance,
-   min model prob) from realized results.
+   min model prob) from realized results. — TODO
 
 ## Phase 2B — AI layer (cost-controlled, resilient, adaptive)
 

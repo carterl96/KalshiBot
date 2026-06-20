@@ -32,6 +32,9 @@ class WindowState:
     hedged: bool = False      # have we opened the opposite-side hedge?
     closed: bool = False      # True once settled / flattened
     peak_price: dict = field(default_factory=dict)  # side -> highest sell-price seen
+    entry_model_prob: dict = field(default_factory=dict)  # side -> model_prob at entry
+    first_entry_at: dict = field(default_factory=dict)    # side -> ts of first entry
+    adverse_streak: dict = field(default_factory=dict)    # side -> consecutive adverse reads
 
 
 class WindowManager:
@@ -66,7 +69,11 @@ class WindowManager:
         stop_loss_max_prob: float = 0.25,
         trail_arm_gain: float = 0.15,
         trail_distance: float = 0.08,
-        stop_loss_drop: float = 0.18,
+        stop_model_floor: float = 0.35,
+        stop_model_drop: float = 0.25,
+        stop_debounce: int = 6,
+        stop_grace_s: float = 20.0,
+        stop_catastrophe_drop: float = 0.30,
     ):
         self.max_entries = max_entries
         self.hedge_trigger_prob = hedge_trigger_prob
@@ -78,8 +85,20 @@ class WindowManager:
         # above entry, then exit if it retraces `trail_distance` from its peak.
         self.trail_arm_gain = trail_arm_gain
         self.trail_distance = trail_distance
-        # Price stop-loss: cut if the sell-price falls `stop_loss_drop` below entry.
-        self.stop_loss_drop = stop_loss_drop
+        # Model-aware stop-loss (anti "cold-feet"): cut when the THESIS breaks,
+        # not on transient price noise.
+        #   * stop_model_floor — cut if model_prob falls to/below this absolute level
+        #   * stop_model_drop  — ...or this far below the model_prob we had at entry
+        #   * stop_debounce    — adverse condition must persist this many reads
+        #   * stop_grace_s     — post-entry settle window (model stop suppressed,
+        #                        catastrophe stop still active)
+        #   * stop_catastrophe_drop — wide hard price stop that fires immediately,
+        #                        any time, as a circuit breaker on a real gap-down
+        self.stop_model_floor = stop_model_floor
+        self.stop_model_drop = stop_model_drop
+        self.stop_debounce = stop_debounce
+        self.stop_grace_s = stop_grace_s
+        self.stop_catastrophe_drop = stop_catastrophe_drop
         self._windows: dict[str, WindowState] = {}
 
     # ---- accessor ----
@@ -170,8 +189,14 @@ class WindowManager:
         Priority:
           1. ``trailing_take_profit`` — armed once the bid has run far enough
              above entry; fires when it retraces ``trail_distance`` from peak.
-          2. ``stop_loss`` — bid has fallen ``stop_loss_drop`` below entry.
-          3. ``take_profit`` / ``cut_loss`` — original near-close model exits.
+          2. ``stop_loss_catastrophe`` — bid gapped a wide ``stop_catastrophe_drop``
+             below entry; fires immediately as a circuit breaker.
+          3. ``stop_loss_model`` — our thesis broke: the model's fair probability
+             fell below the floor (or far below entry) and *stayed* there for
+             ``stop_debounce`` reads, after a short post-entry grace period.
+             This is the anti "cold-feet" stop: transient price dips with spot
+             ~unchanged don't trigger it; only a real adverse move does.
+          4. ``take_profit`` / ``cut_loss`` — original near-close model exits.
         Returns the reason string, or ``None`` to keep holding.
         """
         w = self.get(ticker)
@@ -185,9 +210,32 @@ class WindowManager:
             armed = peak >= entry_price + self.trail_arm_gain
             if armed and sell_price <= peak - self.trail_distance:
                 return "trailing_take_profit"
-            # Hard price stop-loss.
-            if sell_price <= entry_price - self.stop_loss_drop:
-                return "stop_loss"
+            # Catastrophe backstop: a real, large adverse price move. Fires
+            # immediately (no debounce / no grace) so a genuine gap-down is
+            # still capped.
+            if sell_price <= entry_price - self.stop_catastrophe_drop:
+                return "stop_loss_catastrophe"
+
+        # Model-aware stop with debounce + grace. The "adverse" condition is a
+        # broken thesis, judged on the model's fair probability — NOT the raw
+        # bid, which is noisy in thin books right after open.
+        entry_prob = w.entry_model_prob.get(side)
+        in_grace = (
+            self.stop_grace_s > 0
+            and (time.time() - w.first_entry_at.get(side, 0.0)) < self.stop_grace_s
+        )
+        adverse = model_prob <= self.stop_model_floor
+        if entry_prob is not None and model_prob <= entry_prob - self.stop_model_drop:
+            adverse = True
+        if adverse and not in_grace:
+            streak = w.adverse_streak.get(side, 0) + 1
+            w.adverse_streak[side] = streak
+            if streak >= self.stop_debounce:
+                return "stop_loss_model"
+        else:
+            # Thesis recovered (or still settling) — reset the debounce counter
+            # so we don't accumulate non-consecutive adverse reads.
+            w.adverse_streak[side] = 0
 
         # Backstop: original near-close, model-confidence exits.
         if self.should_take_profit(ticker, side, model_prob, tau_seconds):
@@ -198,12 +246,19 @@ class WindowManager:
 
     # ---- record actions ----
 
-    def record_entry(self, ticker: str, side: str) -> None:
+    def record_entry(self, ticker: str, side: str, model_prob: float = 0.0) -> None:
         w = self.get(ticker)
         if w.direction == "":
             w.direction = side
         w.entries += 1
-        log.debug("[window] %s entry #%d side=%s", ticker, w.entries, side)
+        # Capture the thesis strength at first entry so the model-aware stop can
+        # detect deterioration relative to where we came in.
+        if side not in w.first_entry_at:
+            w.first_entry_at[side] = time.time()
+            w.entry_model_prob[side] = model_prob
+        w.adverse_streak[side] = 0
+        log.debug("[window] %s entry #%d side=%s model_prob=%.2f",
+                  ticker, w.entries, side, model_prob)
 
     def record_hedge(self, ticker: str) -> None:
         w = self.get(ticker)

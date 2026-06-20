@@ -73,7 +73,7 @@ class TradingEngine:
         self.guidance = MetaGuidance()
 
         # Phase 2: window state machine + calibration tracker.
-        self.window_mgr = WindowManager()
+        self.window_mgr = self._new_window_manager()
         self.calibration = CalibrationTracker()
         self._llm_proposal_counter = 0   # run proposals every N LLM cycles
 
@@ -101,6 +101,17 @@ class TradingEngine:
         )
 
         self._build_from_settings(settings)
+
+    def _new_window_manager(self) -> WindowManager:
+        """Build a WindowManager wired to the current strategy/stop settings."""
+        s = self.settings
+        return WindowManager(
+            stop_model_floor=s.stop_model_floor,
+            stop_model_drop=s.stop_model_drop,
+            stop_debounce=s.stop_debounce,
+            stop_grace_s=s.stop_grace_s,
+            stop_catastrophe_drop=s.stop_catastrophe_drop,
+        )
 
     def _build_from_settings(self, settings: Settings) -> None:
         """(Re)construct credential-dependent clients and feeds from settings."""
@@ -230,7 +241,7 @@ class TradingEngine:
             self.orders.reset_positions()
         # Reset the per-window state machine so stale entries don't block or
         # confuse the new mode's windows.
-        self.window_mgr = WindowManager()
+        self.window_mgr = self._new_window_manager()
         # Re-baseline drawdown tracking to the new mode's balance so a large
         # paper<->live balance change isn't misread as a drawdown and trips
         # the circuit breaker.
@@ -327,6 +338,7 @@ class TradingEngine:
                     book=book,
                     min_edge=effective_min_edge,
                     fee_buffer=self.settings.fee_buffer,
+                    min_model_prob=self.settings.min_model_prob,
                 )
                 if sig is not None:
                     self.signals[f"{m.ticker}:{side}"] = sig
@@ -442,7 +454,9 @@ class TradingEngine:
                 if label == "hedge":
                     self.window_mgr.record_hedge(market.ticker)
                 else:
-                    self.window_mgr.record_entry(market.ticker, sig.side)
+                    self.window_mgr.record_entry(
+                        market.ticker, sig.side, model_prob=sig.model_prob
+                    )
             else:
                 # Surface real rejection (e.g. a broker API error) instead of
                 # silently labelling it "no size".

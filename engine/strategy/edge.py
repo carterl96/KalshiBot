@@ -55,6 +55,7 @@ def evaluate(
     book: OrderBook,
     min_edge: float,
     fee_buffer: float,
+    min_model_prob: float = 0.0,
     near_close_seconds: float = 20.0,
 ) -> Optional[Signal]:
     """Evaluate a single market side and return a Signal (or None if no book).
@@ -75,6 +76,13 @@ def evaluate(
 
     tradeable = edge >= min_edge
     reason = "edge >= min_edge" if tradeable else "edge below threshold"
+    # Conviction filter: only take entries the model is reasonably confident in.
+    # A positive edge on a low-probability side is still +EV in expectation, but
+    # it loses most of the time — we trade for a high green rate by sticking to
+    # higher-conviction setups.
+    if tradeable and model_p < min_model_prob:
+        tradeable = False
+        reason = f"model_prob {model_p:.2f} below conviction floor {min_model_prob:.2f}"
     if near_close:
         # Near settlement, require the spot to be clearly on the right side of
         # the strike to avoid coin-flip pins.

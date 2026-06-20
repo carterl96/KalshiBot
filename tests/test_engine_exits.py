@@ -34,7 +34,7 @@ def _market(ticker="KXBTC15M-TEST"):
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_fires_with_no_entry_signal():
+async def test_catastrophe_stop_fires_with_no_entry_signal():
     eng, store = await _make_engine()
     try:
         m = _market()
@@ -42,15 +42,44 @@ async def test_stop_loss_fires_with_no_entry_signal():
         eng.orders.position(m.ticker, "down").add(100, 0.57)
         eng.window_mgr.record_entry(m.ticker, "down")
 
-        # NO bid collapsed to 0.30 — below the 0.57 - 0.18 = 0.39 stop.
+        # NO bid gaps to 0.20 — a 0.37 drop, past the 0.30 catastrophe stop.
         book = eng.kalshi_ws.book(m.ticker)
-        book.no = {30: 50}
+        book.no = {20: 50}
         book.yes = {}
 
         # No signals computed at all — exits must still run.
         await eng._handle_exits(m, book, spot=60000.0, sigma=0.5, tau=300.0)
 
         assert eng.orders.position(m.ticker, "down").quantity == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_cold_feet_on_transient_dip():
+    """A moderate price dip with the model thesis intact must NOT panic-sell.
+
+    This is the behavior the old hard price stop got wrong: a thin-book dip
+    right after entry would trip an 18c stop even though spot (and thus our
+    fair value) was unchanged, then the price recovered.
+    """
+    eng, store = await _make_engine()
+    try:
+        m = _market()
+        eng.orders.position(m.ticker, "down").add(100, 0.57)
+        eng.window_mgr.record_entry(m.ticker, "down", model_prob=0.55)
+        # Disable the grace window so we're purely testing the model stop logic.
+        eng.window_mgr.stop_grace_s = 0.0
+
+        book = eng.kalshi_ws.book(m.ticker)
+        book.no = {45: 50}   # bid dipped 0.12 — noticeable but not catastrophic
+        book.yes = {}
+
+        # Spot still at the strike => model prob ~0.5, thesis intact. Many reads.
+        for _ in range(20):
+            await eng._handle_exits(m, book, spot=60000.0, sigma=0.5, tau=300.0)
+
+        assert eng.orders.position(m.ticker, "down").quantity == 100  # still held
     finally:
         await store.close()
 

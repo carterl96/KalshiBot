@@ -42,11 +42,63 @@ def test_trailing_not_armed_without_runup():
     assert m.exit_signal(t, s, 0.34, 0.37, 0.5, 600) is None
 
 
-def test_price_stop_loss_fires():
-    m = make_mgr(stop_loss_drop=0.18)
+def test_catastrophe_stop_fires_immediately():
+    # A wide adverse price gap fires at once — no debounce, no grace.
+    m = make_mgr(stop_catastrophe_drop=0.30)
     t, s = _open(m)
-    # Entry 0.37, bid falls to 0.18 (0.19 drop) -> stop, well before close.
-    assert m.exit_signal(t, s, 0.18, 0.37, 0.2, 600) == "stop_loss"
+    # Entry 0.57, bid gaps to 0.20 (0.37 drop >= 0.30) -> immediate stop.
+    assert m.exit_signal(t, s, 0.20, 0.57, 0.5, 600) == "stop_loss_catastrophe"
+
+
+def test_no_cold_feet_on_transient_dip_with_thesis_intact():
+    # The whole point: a price dip that is NOT catastrophic, while the model's
+    # fair probability is still healthy, must NOT trigger a stop — even repeated.
+    m = make_mgr(stop_grace_s=0.0, stop_model_floor=0.35, stop_debounce=3)
+    t, s = _open(m, side="up")
+    m.get(t).entry_model_prob["up"] = 0.62
+    for _ in range(10):
+        # bid down 0.15 from entry (< catastrophe), model still 0.58 (healthy).
+        assert m.exit_signal(t, s, 0.42, 0.57, 0.58, 600) is None
+
+
+def test_model_stop_fires_after_debounce_when_thesis_breaks():
+    m = make_mgr(stop_grace_s=0.0, stop_model_floor=0.35, stop_debounce=3)
+    t, s = _open(m, side="up")
+    m.get(t).entry_model_prob["up"] = 0.62
+    # Model probability collapses below the floor; needs 3 consecutive reads.
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.30, 600) is None   # streak 1
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.30, 600) is None   # streak 2
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.30, 600) == "stop_loss_model"  # streak 3
+
+
+def test_model_stop_debounce_resets_on_recovery():
+    m = make_mgr(stop_grace_s=0.0, stop_model_floor=0.35, stop_debounce=3)
+    t, s = _open(m, side="up")
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.30, 600) is None   # adverse, streak 1
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.55, 600) is None   # recovered, reset
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.30, 600) is None   # adverse, streak 1 again
+
+
+def test_model_stop_relative_to_entry_prob():
+    # Even above the absolute floor, a large drop from the entry thesis triggers.
+    m = make_mgr(stop_grace_s=0.0, stop_model_floor=0.20, stop_model_drop=0.25,
+                 stop_debounce=2)
+    t, s = _open(m, side="up", )
+    m.get(t).entry_model_prob["up"] = 0.80
+    # 0.80 -> 0.50 is a 0.30 drop (>= 0.25) though 0.50 is above the 0.20 floor.
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.50, 600) is None
+    assert m.exit_signal(t, s, 0.50, 0.57, 0.50, 600) == "stop_loss_model"
+
+
+def test_grace_period_suppresses_model_stop():
+    # Default grace (20s) is active right after entry: model stop is held off,
+    # but the catastrophe stop still works.
+    m = make_mgr(stop_grace_s=20.0, stop_model_floor=0.35, stop_debounce=1)
+    t, s = _open(m, side="up")
+    for _ in range(5):
+        assert m.exit_signal(t, s, 0.50, 0.57, 0.10, 600) is None  # in grace
+    # Catastrophe still fires during grace.
+    assert m.exit_signal(t, s, 0.20, 0.57, 0.10, 600) == "stop_loss_catastrophe"
 
 
 # ---- entry / scale-in ----
