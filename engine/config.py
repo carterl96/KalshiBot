@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # --- Trading mode & safety ---
     # Engine ALWAYS boots in paper mode. Live requires an explicit admin toggle.
     start_mode: str = Field(default="paper")  # "paper" | "live"
-    autostart: bool = Field(default=False)
+    autostart: bool = Field(default=True)
 
     # Which series to trade. Comma-separated Kalshi series prefixes.
     series: str = Field(default="KXBTC15M,KXBTCD")
