@@ -15,10 +15,10 @@ def test_clamp_drops_non_whitelisted_params():
 
 
 def test_clamp_bounds_values():
-    out = clamp_params({"min_edge": 999, "min_model_prob": 0.01,
+    out = clamp_params({"min_edge": 999, "min_model_prob": 999.0,
                         "kelly_fraction": 5.0})
     assert out["min_edge"] == TUNABLE_BOUNDS["min_edge"][1]        # clamped high
-    assert out["min_model_prob"] == TUNABLE_BOUNDS["min_model_prob"][0]  # clamped low
+    assert out["min_model_prob"] == TUNABLE_BOUNDS["min_model_prob"][1]  # clamped high
     assert out["kelly_fraction"] == TUNABLE_BOUNDS["kelly_fraction"][1]
 
 

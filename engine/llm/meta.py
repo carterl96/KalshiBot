@@ -102,11 +102,12 @@ PROPOSAL_SYSTEM = (
     '{"description": "<1-2 sentences explaining the reasoning>", '
     '"params": {"min_edge": <float|null>, "min_model_prob": <float|null>, '
     '"fee_buffer": <float|null>, "kelly_fraction": <float|null>, '
-    '"vol_lookback_s": <int|null>, "stop_model_floor": <float|null>, '
-    '"stop_model_drop": <float|null>, "stop_catastrophe_drop": <float|null>}}. '
-    "Optimize EXPECTED VALUE, not win rate (a high win rate from overpaying "
-    "loses money). Omit a param by setting it to null. Do NOT re-propose a "
-    "change that was just reverted. Small incremental steps, never wild swings. "
+    '"stop_loss_drop": <float|null>, "vol_lookback_s": <int|null>}}. '
+    "stop_loss_drop is the hard price stop (sell when bid drops this many "
+    "probability points below entry price; default 0.18, range 0.05-0.35). "
+    "min_model_prob filters entries below a conviction floor (0.0=disabled). "
+    "Optimize EXPECTED VALUE, not win rate. Omit a param by setting it to null. "
+    "Do NOT re-propose a change that was just reverted. Small incremental steps. "
     "Hard risk caps are not yours to change."
 )
 

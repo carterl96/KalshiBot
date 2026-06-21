@@ -145,14 +145,7 @@ class TradingEngine:
 
     def _new_window_manager(self) -> WindowManager:
         """Build a WindowManager wired to the current strategy/stop settings."""
-        s = self.settings
-        return WindowManager(
-            stop_model_floor=s.stop_model_floor,
-            stop_model_drop=s.stop_model_drop,
-            stop_debounce=s.stop_debounce,
-            stop_grace_s=s.stop_grace_s,
-            stop_catastrophe_drop=s.stop_catastrophe_drop,
-        )
+        return WindowManager(stop_loss_drop=self.settings.stop_loss_drop)
 
     def _build_from_settings(self, settings: Settings) -> None:
         """(Re)construct credential-dependent clients and feeds from settings."""

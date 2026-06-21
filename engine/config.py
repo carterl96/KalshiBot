@@ -63,24 +63,16 @@ class Settings(BaseSettings):
     # --- Strategy params ---
     min_edge: float = Field(default=0.04)             # required edge (prob units) net of buffer
     fee_buffer: float = Field(default=0.02)           # haircut for fees + half-spread
-    # Minimum model confidence to take an entry. Filters out low-conviction
-    # "cheap longshot" trades that show a tiny edge but a poor win probability,
-    # which drag the green rate down. Profit still comes from edge; this just
-    # keeps us in higher-conviction setups.
-    min_model_prob: float = Field(default=0.58)
+    # Minimum model confidence to take an entry. 0.0 = disabled (AI can tune this up).
+    min_model_prob: float = Field(default=0.0)
     vol_lookback_s: int = Field(default=900)          # spot vol estimation window (s)
     spot_symbol_btc: str = Field(default="BTC-USD")
     spot_symbol_eth: str = Field(default="ETH-USD")
 
-    # --- Stop-loss (model-aware, anti-"cold-feet") ---
-    # We exit a losing position when our *thesis* breaks (the model's fair
-    # probability deteriorates), not on transient price noise. A wide hard price
-    # stop remains as a catastrophe backstop.
-    stop_model_floor: float = Field(default=0.35)     # cut if model_prob falls to/below this
-    stop_model_drop: float = Field(default=0.25)      # ...or this far below entry model_prob
-    stop_debounce: int = Field(default=6)             # adverse reads required before cutting
-    stop_grace_s: float = Field(default=20.0)         # post-entry settle window (model stop only)
-    stop_catastrophe_drop: float = Field(default=0.30)  # immediate hard price stop (any time)
+    # --- Stop-loss (hard price stop) ---
+    # Exit a losing position when the sell-price falls this many probability
+    # points below our entry price. The AI autotune loop can tune this.
+    stop_loss_drop: float = Field(default=0.18)
 
     # --- LLM (Phase 2; optional) ---
     anthropic_api_key: str = Field(default="")

@@ -82,12 +82,8 @@ class BacktestParams:
     # measures gross edge; leaving it on measures what you'd actually keep.
     apply_fees: bool = True
     fee_rate: float = 0.07
-    # Model-aware stop-loss params (grace/debounce default to 0/1 for backtest:
-    # historical ticks are coarse and noise-free, so the anti-noise machinery
-    # that matters live is not exercised here).
-    stop_model_floor: float = 0.35
-    stop_model_drop: float = 0.25
-    stop_catastrophe_drop: float = 0.30
+    # Hard price stop: exit when sell-price drops this far below entry.
+    stop_loss_drop: float = 0.18
 
 
 @dataclass
@@ -196,16 +192,7 @@ class BacktestRunner:
             )
         )
         orders = OrderManager(rest=None, mode="paper", balance=p.starting_balance)
-        # grace=0 / debounce=1: historical ticks are coarse & noise-free, so the
-        # live anti-noise machinery is disabled; the model stop fires on the
-        # first adverse tick. This still faithfully tests the THESIS-based exit.
-        window_mgr = WindowManager(
-            stop_model_floor=p.stop_model_floor,
-            stop_model_drop=p.stop_model_drop,
-            stop_catastrophe_drop=p.stop_catastrophe_drop,
-            stop_debounce=1,
-            stop_grace_s=0.0,
-        )
+        window_mgr = WindowManager(stop_loss_drop=p.stop_loss_drop)
         result = BacktestResult(params=p)
 
         # Group ticks by window (ticker) and sort chronologically.

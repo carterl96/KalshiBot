@@ -31,17 +31,15 @@ from typing import Optional
 # is off-limits to the AI (notably the risk caps).
 TUNABLE_BOUNDS: dict[str, tuple[float, float]] = {
     "min_edge": (0.01, 0.15),
-    "min_model_prob": (0.50, 0.85),
+    "min_model_prob": (0.0, 0.85),
     "fee_buffer": (0.0, 0.05),
     "kelly_fraction": (0.05, 0.50),
-    "stop_model_floor": (0.20, 0.45),
-    "stop_model_drop": (0.10, 0.40),
-    "stop_catastrophe_drop": (0.20, 0.50),
+    "stop_loss_drop": (0.05, 0.35),
     "vol_lookback_s": (120, 3600),
 }
 
 # Which engine object each tunable lives on (so the engine can route updates).
-WINDOW_PARAMS = {"stop_model_floor", "stop_model_drop", "stop_catastrophe_drop"}
+WINDOW_PARAMS = {"stop_loss_drop"}
 RISK_PARAMS = {"kelly_fraction"}
 # everything else in TUNABLE_BOUNDS lives on Settings
 
